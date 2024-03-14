@@ -204,7 +204,10 @@ where
         }
 
         if state.has_room_for(1) {
-            state.send_and_wake_recv_future(value);
+            if let Some(waker) = state.send_and_get_waker(value) {
+                drop(state);
+                waker.wake();
+            }
             Ok(())
         } else {
             Err(TrySendError::Full(value))
@@ -278,63 +281,105 @@ where
     }
 
     fn drop_sender(&self) {
-        let mut inner = self.inner_mut();
-        inner.senders_count -= 1;
+        let wakers = {
+            let mut inner = self.inner_mut();
+            inner.senders_count -= 1;
 
-        if inner.senders_count == 0 {
-            inner.mark_disconnected_and_notify_recv_futures();
-        }
-    }
+            if inner.senders_count == 0 {
+                Some(inner.mark_disconnected_and_take_recv_futures())
+            } else {
+                None
+            }
+        };
 
-    fn drop_receiver(&self) {
-        let mut inner = self.inner_mut();
-        inner.receivers_count -= 1;
-
-        if inner.receivers_count == 0 {
-            inner.mark_disconnected_and_notify_send_futures();
-        }
-    }
-
-    fn drop_permit(&self, has_sent: bool) {
-        let mut inner = self.inner_mut();
-        inner.reserved_count -= 1;
-
-        // When the permit was not used for sending, it means a spot was freed, so we can notify
-        // one of the senders to proceed.
-        if !has_sent {
-            if let Some((_, waker)) = inner.waiting_send_futures.pop_first() {
+        if let Some(wakers) = wakers {
+            for waker in wakers {
                 waker.wake()
             }
         }
     }
 
+    fn drop_receiver(&self) {
+        let wakers = {
+            let mut inner = self.inner_mut();
+            inner.receivers_count -= 1;
+
+            if inner.receivers_count == 0 {
+                Some(inner.mark_disconnected_and_take_send_futures())
+            } else {
+                None
+            }
+        };
+
+        if let Some(wakers) = wakers {
+            for waker in wakers {
+                waker.wake()
+            }
+        }
+    }
+
+    fn drop_permit(&self, has_sent: bool) {
+        let waker = {
+            let mut inner = self.inner_mut();
+            inner.reserved_count -= 1;
+
+            // When the permit was not used for sending, it means a spot was freed, so we can notify
+            // one of the senders to proceed.
+            if !has_sent {
+                inner.waiting_send_futures.pop_first()
+            } else {
+                None
+            }
+        };
+
+        if let Some((_, waker)) = waker {
+            waker.wake();
+        }
+    }
+
     fn drop_send_future(&self, id: &WakerId, has_sent: bool) {
-        let mut inner = self.inner_mut();
+        let waker = {
+            let mut inner = self.inner_mut();
 
-        let was_awoken = inner.waiting_send_futures.remove(id).is_some();
+            let was_awoken = inner.waiting_send_futures.remove(id).is_some();
 
-        // Wake another sender in case this one has been awoken, but it was dropped before it
-        // managed to send anything.
-        if was_awoken && !has_sent {
-            inner.wake_one_send_future();
+            // Wake another sender in case this one has been awoken, but it was dropped before it
+            // managed to send anything.
+            if was_awoken && !has_sent {
+                inner.take_one_send_future_waker()
+            } else {
+                None
+            }
+        };
+
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 
     fn drop_recv_future(&self, id: &WakerId, has_received: bool) {
-        let mut inner = self.inner_mut();
-        let was_awoken = inner.waiting_recv_futures.remove(id).is_none();
+        let waker = {
+            let mut inner = self.inner_mut();
+            let was_awoken = inner.waiting_recv_futures.remove(id).is_none();
 
-        // Wake another receiver in case this one has been awoken, but it was dropped before it
-        // managed to receive anything.
-        if was_awoken {
-            if has_received {
-                // If we have received, it means a spot was freed in the internal buffer, so wake
-                // one sender.
-                inner.wake_one_send_future();
+            // Wake another receiver in case this one has been awoken, but it was dropped before it
+            // managed to receive anything.
+            if was_awoken {
+                if has_received {
+                    // If we have received, it means a spot was freed in the internal buffer, so wake
+                    // one sender.
+                    inner.take_one_send_future_waker()
+                } else {
+                    // If we have not received, it means another RecvFuture might take over.
+                    inner.take_one_recv_future_waker()
+                }
             } else {
-                // If we have not received, it means another RecvFuture might take over.
-                inner.wake_one_recv_future();
+                None
             }
+        };
+
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 }
@@ -374,41 +419,41 @@ where
         space >= required_num_items
     }
 
-    fn send_and_wake_recv_future(&mut self, value: T) {
+    #[must_use]
+    fn send_and_get_waker(&mut self, value: T) -> Option<Waker> {
         self.buffer.push_back(value);
-        self.wake_one_recv_future();
+        self.take_one_recv_future_waker()
     }
 
-    fn mark_disconnected_and_notify_recv_futures(&mut self) {
+    #[must_use]
+    fn mark_disconnected_and_take_recv_futures(&mut self) -> impl Iterator<Item = Waker> {
         self.disconnected = true;
-
-        Self::wake_all(&mut self.waiting_recv_futures);
+        Self::take_all_wakers(&mut self.waiting_recv_futures).into_values()
     }
 
-    fn mark_disconnected_and_notify_send_futures(&mut self) {
+    #[must_use]
+    fn mark_disconnected_and_take_send_futures(&mut self) -> impl Iterator<Item = Waker> {
         self.disconnected = true;
-
-        Self::wake_all(&mut self.waiting_send_futures);
+        Self::take_all_wakers(&mut self.waiting_send_futures).into_values()
     }
 
-    fn wake_one_send_future(&mut self) {
-        Self::wake_one(&mut self.waiting_send_futures)
+    #[must_use]
+    fn take_one_send_future_waker(&mut self) -> Option<Waker> {
+        Self::take_one_waker(&mut self.waiting_send_futures)
     }
 
-    fn wake_one_recv_future(&mut self) {
-        Self::wake_one(&mut self.waiting_recv_futures)
+    #[must_use]
+    fn take_one_recv_future_waker(&mut self) -> Option<Waker> {
+        Self::take_one_waker(&mut self.waiting_recv_futures)
     }
 
-    fn wake_one(map: &mut BTreeMap<WakerId, Waker>) {
-        if let Some((_id, waker)) = map.pop_first() {
-            waker.wake()
-        }
+    #[must_use]
+    fn take_one_waker(map: &mut BTreeMap<WakerId, Waker>) -> Option<Waker> {
+        map.pop_first().map(|(_, waker)| waker)
     }
 
-    fn wake_all(map: &mut BTreeMap<WakerId, Waker>) {
-        for (_, waker) in std::mem::take(map) {
-            waker.wake()
-        }
+    fn take_all_wakers(map: &mut BTreeMap<WakerId, Waker>) -> BTreeMap<WakerId, Waker> {
+        std::mem::take(map)
     }
 }
 
@@ -456,7 +501,10 @@ where
         if state.disconnected {
             Poll::Ready(Err(SendError(this.value.take().expect("some value"))))
         } else if state.has_room_for(1) {
-            state.send_and_wake_recv_future(this.value.take().expect("some value"));
+            if let Some(waker) = state.send_and_get_waker(this.value.take().expect("some value")) {
+                drop(state);
+                waker.wake();
+            }
             Poll::Ready(Ok(()))
         } else {
             state
@@ -498,7 +546,9 @@ where
     }
 
     pub fn send(mut self, value: T) {
-        self.state.inner_mut().send_and_wake_recv_future(value);
+        if let Some(waker) = self.state.inner_mut().send_and_get_waker(value) {
+            waker.wake();
+        }
         self.has_sent = true;
         drop(self)
     }
@@ -614,7 +664,10 @@ where
                     state
                         .waiting_recv_futures
                         .insert(this.id, cx.waker().clone());
-                    state.wake_one_send_future();
+                    if let Some(waker) = state.take_one_send_future_waker() {
+                        drop(state);
+                        waker.wake();
+                    }
                     Poll::Pending
                 }
             }
@@ -839,7 +892,8 @@ mod testing {
         tx.try_send(1).expect("sent");
         // It would hang without the drop, since the recv would be awoken, but we'd never await for
         // it. This is the main flaw of this design where only a single future is awoken at the
-        // time.
+        // time. Alternatively, we could wake all of them at once, but this would most likely
+        // result in performance degradation due to lock contention.
         drop(recv);
         let res = task.await.expect("no panic").expect("receivd");
         assert_eq!(res, 1);
