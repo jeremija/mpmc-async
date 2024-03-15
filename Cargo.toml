@@ -1,7 +1,10 @@
 [package]
-name = "mpmc"
+name = "mpmc-async"
 version = "0.1.0"
 edition = "2021"
+description = "A multi-producer, multi-consumer async channel with reservations"
+repository = "https://github.com/jeremija/mpmc-async"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
