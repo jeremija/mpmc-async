@@ -1,3 +1,77 @@
+//! A multi-producer, multi-consumer async channel with reservations.
+//!
+//! Example usage:
+//!
+//! ```rust
+//! tokio_test::block_on(async {
+//!     let (tx1, rx1) = mpmc_async::channel(2);
+//!
+//!     let task = tokio::spawn(async move {
+//!       let rx2 = rx1.clone();
+//!       assert_eq!(rx1.recv().await.unwrap(), 1);
+//!       assert_eq!(rx2.recv().await.unwrap(), 2);
+//!     });
+//!
+//!     let tx2 = tx1.clone();
+//!     let permit = tx1.reserve().await.unwrap();
+//!     tx2.send(1).await.unwrap();
+//!     permit.send(2);
+//!
+//!     task.await.unwrap();
+//! });
+//! ```
+//!
+//! A more complex example with multiple sender and receiver tasks:
+//!
+//! ```rust
+//! use std::collections::BTreeSet;
+//! use std::ops::DerefMut;
+//! use std::sync::{Arc, Mutex};
+//!
+//! tokio_test::block_on(async {
+//!     let (tx, rx) = mpmc_async::channel(1);
+//!
+//!     let num_workers = 10;
+//!     let count = 10;
+//!     let mut tasks = Vec::with_capacity(num_workers);
+//!
+//!     for i in 0..num_workers {
+//!         let mut tx = tx.clone();
+//!         let task = tokio::spawn(async move {
+//!             for j in 0..count {
+//!                 let val = i * count + j;
+//!                 tx.reserve().await.expect("no error").send(val);
+//!             }
+//!         });
+//!         tasks.push(task);
+//!     }
+//!
+//!     let total = count * num_workers;
+//!     let values = Arc::new(Mutex::new(BTreeSet::new()));
+//!
+//!     for _ in 0..num_workers {
+//!         let values = values.clone();
+//!         let rx = rx.clone();
+//!         let task = tokio::spawn(async move {
+//!             for _ in 0..count {
+//!                 let val = rx.recv().await.expect("Failed to recv");
+//!                 values.lock().unwrap().insert(val);
+//!             }
+//!         });
+//!         tasks.push(task);
+//!     }
+//!
+//!     for task in tasks {
+//!         task.await.expect("failed to join task");
+//!     }
+//!
+//!     let exp = (0..total).collect::<Vec<_>>();
+//!     let got = std::mem::take(values.lock().unwrap().deref_mut())
+//!         .into_iter()
+//!         .collect::<Vec<_>>();
+//!     assert_eq!(exp, got);
+//! });
+//! ```
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Display;
 use std::ops::DerefMut;
@@ -91,11 +165,15 @@ impl Display for TryRecvError {
     }
 }
 
-/// Creates a new bounded channel.
-pub fn channel<T>(cap: usize) -> (Sender<T>, Receiver<T>)
+/// Creates a new bounded channel. When `cap` is 0 it will be increased to 1.
+pub fn channel<T>(mut cap: usize) -> (Sender<T>, Receiver<T>)
 where
     T: Send + Sync + 'static,
 {
+    if cap == 0 {
+        cap = 1
+    }
+
     let state = State {
         inner: Arc::new(Mutex::new(InnerState {
             buffer: VecDeque::with_capacity(cap),
@@ -112,6 +190,7 @@ where
     (state.new_sender(), state.new_receiver())
 }
 
+/// Receives messages sent by [Sender].
 pub struct Receiver<T>
 where
     T: Send + Sync + 'static,
@@ -119,6 +198,9 @@ where
     state: State<T>,
 }
 
+/// Cloning creates new a instance with the shared state  and increases the internal reference
+/// counter. It is guaranteed that a single message will be distributed to exacly one receiver
+/// future awaited after calling `recv()`.
 impl<T> Clone for Receiver<T>
 where
     T: Send + Sync + 'static,
@@ -136,12 +218,16 @@ where
         Self { state }
     }
 
+    /// Waits until there's a message to be read and returns. Returns an error when there are no
+    /// more messages in the queue and all [Sender]s have been dropped.
     pub async fn recv(&self) -> Result<T, RecvError> {
         let recv = RecvFuture::new(self.state.next_waker_id(), self.state.cloned());
 
         recv.await
     }
 
+    /// Checks if there's a message to be read and returns immediately. Returns an error when the
+    /// channel is disconnected or empty.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         let mut state = self.state.inner_mut();
 
@@ -155,6 +241,7 @@ where
     }
 }
 
+/// The last reciever that's dropped will mark the channel as disconnected.
 impl<T> Drop for Receiver<T>
 where
     T: Send + Sync + 'static,
@@ -164,6 +251,7 @@ where
     }
 }
 
+/// Producers messages to be read by [Receiver]s.
 pub struct Sender<T>
 where
     T: Send + Sync + 'static,
@@ -171,6 +259,8 @@ where
     state: State<T>,
 }
 
+/// Cloning creates new a instance with the shared state  and increases the internal reference
+/// counter.
 impl<T> Clone for Sender<T>
 where
     T: Send + Sync + 'static,
@@ -238,6 +328,7 @@ where
     }
 }
 
+/// The last sender that's dropped will mark the channel as disconnected.
 impl<T> Drop for Sender<T>
 where
     T: Send + Sync + 'static,

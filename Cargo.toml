@@ -12,3 +12,4 @@ license = "MIT"
 
 [dev-dependencies]
 tokio = { version = "1.36.0", features = ["rt", "macros", "time"] }
+tokio-test = "0.4.4"
