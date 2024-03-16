@@ -218,6 +218,12 @@ where
         Self { state }
     }
 
+    /// Disconnects all receivers from senders. The receivers will still receive all buffered
+    /// or reserved messages before returning an error, allowing a graceful teardown.
+    pub fn close_all(&self) {
+        self.state.close_all_receivers();
+    }
+
     /// Waits until there's a message to be read and returns. Returns an error when there are no
     /// more messages in the queue and all [Sender]s have been dropped.
     pub async fn recv(&self) -> Result<T, RecvError> {
@@ -233,7 +239,7 @@ where
 
         if let Some(value) = state.buffer.pop_front() {
             Ok(value)
-        } else if state.disconnected {
+        } else if state.disconnected && state.reserved_count == 0 {
             Err(TryRecvError::Disconnected)
         } else {
             Err(TryRecvError::Empty)
@@ -371,18 +377,7 @@ where
         Receiver::new(self.cloned())
     }
 
-    fn drop_sender(&self) {
-        let wakers = {
-            let mut inner = self.inner_mut();
-            inner.senders_count -= 1;
-
-            if inner.senders_count == 0 {
-                Some(inner.mark_disconnected_and_take_recv_futures())
-            } else {
-                None
-            }
-        };
-
+    fn wake_all(wakers: Option<impl Iterator<Item = Waker>>) {
         if let Some(wakers) = wakers {
             for waker in wakers {
                 waker.wake()
@@ -390,23 +385,41 @@ where
         }
     }
 
+    fn close_all_receivers(&self) {
+        let (send_wakers, recv_wakers) = {
+            let mut inner = self.inner_mut();
+            let send_wakers = inner.mark_disconnected_and_take_send_futures();
+            // Keep receivers alive in case there are any active Permits.
+            let recv_wakers = (inner.reserved_count == 0)
+                .then(|| inner.mark_disconnected_and_take_recv_futures());
+
+            (send_wakers, recv_wakers)
+        };
+
+        Self::wake_all(Some(send_wakers));
+        Self::wake_all(recv_wakers);
+    }
+
+    fn drop_sender(&self) {
+        let wakers = {
+            let mut inner = self.inner_mut();
+            inner.senders_count -= 1;
+
+            (inner.senders_count == 0).then(|| inner.mark_disconnected_and_take_recv_futures())
+        };
+
+        Self::wake_all(wakers);
+    }
+
     fn drop_receiver(&self) {
         let wakers = {
             let mut inner = self.inner_mut();
             inner.receivers_count -= 1;
 
-            if inner.receivers_count == 0 {
-                Some(inner.mark_disconnected_and_take_send_futures())
-            } else {
-                None
-            }
+            (inner.receivers_count == 0).then(|| inner.mark_disconnected_and_take_send_futures())
         };
 
-        if let Some(wakers) = wakers {
-            for waker in wakers {
-                waker.wake()
-            }
-        }
+        Self::wake_all(wakers);
     }
 
     fn drop_permit(&self, has_sent: bool) {
@@ -416,11 +429,9 @@ where
 
             // When the permit was not used for sending, it means a spot was freed, so we can notify
             // one of the senders to proceed.
-            if !has_sent {
-                inner.waiting_send_futures.pop_first()
-            } else {
-                None
-            }
+            (!has_sent)
+                .then(|| inner.waiting_send_futures.pop_first())
+                .flatten()
         };
 
         if let Some((_, waker)) = waker {
@@ -436,11 +447,9 @@ where
 
             // Wake another sender in case this one has been awoken, but it was dropped before it
             // managed to send anything.
-            if was_awoken && !has_sent {
-                inner.take_one_send_future_waker()
-            } else {
-                None
-            }
+            (was_awoken && !has_sent)
+                .then(|| inner.take_one_send_future_waker())
+                .flatten()
         };
 
         if let Some(waker) = waker {
@@ -516,14 +525,14 @@ where
         self.take_one_recv_future_waker()
     }
 
-    fn mark_disconnected_and_take_recv_futures(&mut self) -> impl Iterator<Item = Waker> {
-        self.disconnected = true;
-        Self::take_all_wakers(&mut self.waiting_recv_futures).into_values()
-    }
-
     fn mark_disconnected_and_take_send_futures(&mut self) -> impl Iterator<Item = Waker> {
         self.disconnected = true;
         Self::take_all_wakers(&mut self.waiting_send_futures).into_values()
+    }
+
+    fn mark_disconnected_and_take_recv_futures(&mut self) -> impl Iterator<Item = Waker> {
+        self.disconnected = true;
+        Self::take_all_wakers(&mut self.waiting_recv_futures).into_values()
     }
 
     #[must_use]
@@ -614,7 +623,7 @@ where
     }
 }
 
-#[derive(Debug)]
+/// Permit holds a spot in the internal buffer so the message can be sent without awaiting.
 pub struct Permit<T>
 where
     T: Send + Sync + 'static,
@@ -634,6 +643,7 @@ where
         }
     }
 
+    /// Writes a message to the internal buffer.
     pub fn send(mut self, value: T) {
         if let Some(waker) = self.state.inner_mut().send_and_get_waker(value) {
             waker.wake();
@@ -747,7 +757,7 @@ where
                 Poll::Ready(Ok(value))
             }
             None => {
-                if state.disconnected {
+                if state.disconnected && state.reserved_count == 0 {
                     Poll::Ready(Err(RecvError))
                 } else {
                     state
@@ -1012,6 +1022,48 @@ mod testing {
         drop(permit);
         task.await.expect("no panic");
         assert_eq!(rx.try_recv().expect("recv"), 1);
+    }
+
+    #[tokio::test]
+    async fn receiver_close_all() {
+        let (tx, rx1) = channel::<i32>(3);
+        let rx2 = rx1.clone();
+        let permit1 = tx.reserve().await.unwrap();
+        let permit2 = tx.reserve().await.unwrap();
+        tx.send(1).await.unwrap();
+        rx1.close_all();
+        assert_eq!(rx1.recv().await.unwrap(), 1);
+        assert_no_recv(&rx1).await;
+        assert_no_recv(&rx2).await;
+        permit1.send(2);
+        permit2.send(3);
+        assert_eq!(rx1.recv().await.unwrap(), 2);
+        assert_eq!(rx2.try_recv().unwrap(), 3);
+        assert_eq!(rx1.recv().await, Err(RecvError));
+        assert_eq!(rx2.recv().await, Err(RecvError));
+        assert!(matches!(tx.send(3).await, Err(SendError(3))));
+    }
+
+    #[tokio::test]
+    async fn receiver_close_all_permit_drop() {
+        let (tx, rx) = channel::<i32>(3);
+        let permit = tx.reserve().await.unwrap();
+        rx.close_all();
+        assert_no_recv(&rx).await;
+        drop(permit);
+        assert_eq!(rx.recv().await, Err(RecvError));
+    }
+
+    async fn assert_no_recv<T>(rx: &Receiver<T>)
+    where
+        T: std::fmt::Debug + Send + Sync + 'static,
+    {
+        tokio::select! {
+            result = rx.recv() => {
+                panic!("unexpected recv: {result:?}");
+            },
+            _ = tokio::time::sleep(std::time::Duration::ZERO) => {},
+        }
     }
 
     struct ReadyFuture {}
