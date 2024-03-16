@@ -410,7 +410,7 @@ where
 {
     fn next_waker_id(&mut self) -> WakerId {
         let waker_id = self.next_waker_id;
-        self.next_waker_id += 1;
+        self.next_waker_id = self.next_waker_id.wrapping_add(1);
         waker_id
     }
 
