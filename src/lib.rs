@@ -425,13 +425,11 @@ where
         self.take_one_recv_future_waker()
     }
 
-    #[must_use]
     fn mark_disconnected_and_take_recv_futures(&mut self) -> impl Iterator<Item = Waker> {
         self.disconnected = true;
         Self::take_all_wakers(&mut self.waiting_recv_futures).into_values()
     }
 
-    #[must_use]
     fn mark_disconnected_and_take_send_futures(&mut self) -> impl Iterator<Item = Waker> {
         self.disconnected = true;
         Self::take_all_wakers(&mut self.waiting_send_futures).into_values()
