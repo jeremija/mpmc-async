@@ -1,3 +1,3 @@
 [toolchain]
 channel = "1.76"
-components = [ "rustfmt", "cargo", "cargo-clippy", "rust-analyzer" ]
+components = [ "rustfmt", "cargo", "clippy", "rust-analyzer" ]
