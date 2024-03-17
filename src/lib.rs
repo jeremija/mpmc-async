@@ -227,7 +227,7 @@ where
     /// Waits until there's a message to be read and returns. Returns an error when there are no
     /// more messages in the queue and all [Sender]s have been dropped.
     pub async fn recv(&self) -> Result<T, RecvError> {
-        let recv = RecvFuture::new(self.state.next_waker_id(), self.state.cloned());
+        let recv = RecvFuture::new(self.state.next_waker_id(), self);
 
         recv.await
     }
@@ -286,7 +286,7 @@ where
 
     /// Waits until the value is sent or returns an when all receivers have been dropped.
     pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
-        let send = SendFuture::new(self.state.next_waker_id(), self.state.cloned(), value);
+        let send = SendFuture::new(self.state.next_waker_id(), self, value);
 
         send.await
     }
@@ -312,7 +312,7 @@ where
 
     /// Waits until a permit is reserved or returns an when all receivers have been dropped.
     pub async fn reserve(&self) -> Result<Permit<T>, ReserveError> {
-        let reserve = ReserveFuture::new(self.state.next_waker_id(), self.state.cloned());
+        let reserve = ReserveFuture::new(self.state.next_waker_id(), self.state.clone());
 
         reserve.await
     }
@@ -327,7 +327,7 @@ where
 
         if state.has_room_for(1) {
             state.reserved_count += 1;
-            Ok(Permit::new(self.state.cloned()))
+            Ok(Permit::new(self.state.clone()))
         } else {
             Err(TryReserveError::Full)
         }
@@ -344,21 +344,27 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct State<T> {
     inner: Arc<Mutex<InnerState<T>>>,
+}
+
+impl<T> Clone for State<T>
+where
+    T: Send + Sync + 'static,
+{
+
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl<T> State<T>
 where
     T: Send + Sync + 'static,
 {
-    fn cloned(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-
     fn inner_mut(&self) -> impl DerefMut<Target = InnerState<T>> + '_ {
         self.inner.lock().unwrap()
     }
@@ -369,12 +375,12 @@ where
 
     fn new_sender(&self) -> Sender<T> {
         self.inner_mut().senders_count += 1;
-        Sender::new(self.cloned())
+        Sender::new(self.clone())
     }
 
     fn new_receiver(&self) -> Receiver<T> {
         self.inner_mut().receivers_count += 1;
-        Receiver::new(self.cloned())
+        Receiver::new(self.clone())
     }
 
     fn wake_all(wakers: Option<impl Iterator<Item = Waker>>) {
@@ -557,31 +563,31 @@ where
 
 type WakerId = usize;
 
-struct SendFuture<T>
+struct SendFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
     id: WakerId,
-    state: State<T>,
+    sender: &'a Sender<T>,
     value: Option<T>,
 }
 
-impl<T> SendFuture<T>
+impl<'a, T> SendFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
-    fn new(id: WakerId, state: State<T>, value: T) -> Self {
+    fn new(id: WakerId, sender: &'a Sender<T>, value: T) -> Self {
         Self {
             id,
-            state,
+            sender,
             value: Some(value),
         }
     }
 }
 
-impl<T> Unpin for SendFuture<T> where T: Send + Sync + 'static {}
+impl<'a, T> Unpin for SendFuture<'a, T> where T: Send + Sync + 'static {}
 
-impl<T> Future for SendFuture<T>
+impl<'a, T> Future for SendFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
@@ -594,7 +600,7 @@ where
         }
 
         let this = self.deref_mut();
-        let mut state = this.state.inner_mut();
+        let mut state = this.sender.state.inner_mut();
 
         if state.disconnected {
             Poll::Ready(Err(SendError(this.value.take().expect("some value"))))
@@ -613,13 +619,13 @@ where
     }
 }
 
-impl<T> Drop for SendFuture<T>
+impl<'a, T> Drop for SendFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
     fn drop(&mut self) {
         let has_sent = self.value.is_none();
-        self.state.drop_send_future(&self.id, has_sent);
+        self.sender.state.drop_send_future(&self.id, has_sent);
     }
 }
 
@@ -705,7 +711,7 @@ where
             this.has_reserved = true;
             state.reserved_count += 1;
             drop(state);
-            let reserved = Permit::new(self.state.cloned());
+            let reserved = Permit::new(self.state.clone());
             Poll::Ready(Ok(reserved))
         } else {
             state
@@ -716,31 +722,31 @@ where
     }
 }
 
-struct RecvFuture<T>
+struct RecvFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
     id: WakerId,
-    state: State<T>,
+    receiver: &'a Receiver<T>,
     has_received: bool,
 }
 
-impl<T> RecvFuture<T>
+impl<'a, T> RecvFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
-    fn new(id: WakerId, state: State<T>) -> Self {
+    fn new(id: WakerId, receiver: &'a Receiver<T>) -> Self {
         Self {
             id,
-            state,
+            receiver,
             has_received: false,
         }
     }
 }
 
-impl<T> Unpin for RecvFuture<T> where T: Send + Sync + 'static {}
+impl<'a, T> Unpin for RecvFuture<'a, T> where T: Send + Sync + 'static {}
 
-impl<T> Future for RecvFuture<T>
+impl<'a, T> Future for RecvFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
@@ -748,7 +754,7 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.deref_mut();
-        let mut state = this.state.inner_mut();
+        let mut state = this.receiver.state.inner_mut();
         let value = state.buffer.pop_front();
 
         match value {
@@ -774,12 +780,12 @@ where
     }
 }
 
-impl<T> Drop for RecvFuture<T>
+impl<'a, T> Drop for RecvFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        self.state.drop_recv_future(&self.id, self.has_received);
+        self.receiver.state.drop_recv_future(&self.id, self.has_received);
     }
 }
 
