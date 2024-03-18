@@ -856,7 +856,7 @@ where
     }
 }
 
-impl<'a, T> Drop for OwnedPermit<T>
+impl<T> Drop for OwnedPermit<T>
 where
     T: Send + Sync + 'static,
 {
