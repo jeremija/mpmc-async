@@ -245,6 +245,36 @@ where
             Err(TryRecvError::Empty)
         }
     }
+
+    pub async fn recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, RecvError> {
+        let recv = RecvManyFuture::new(self.state.next_waker_id(), self, vec, count);
+        recv.await
+    }
+
+    pub fn try_recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, TryRecvError> {
+        let mut state = self.state.inner_mut();
+
+        if let Some(value) = state.buffer.pop_front() {
+            let mut num_received = 1;
+            vec.push(value);
+
+            for _ in 1..count {
+                match state.buffer.pop_front() {
+                    Some(value) => {
+                        vec.push(value);
+                        num_received += 1;
+                    }
+                    None => break,
+                }
+            }
+
+            Ok(num_received)
+        } else if state.disconnected && state.reserved_count == 0 {
+            Err(TryRecvError::Disconnected)
+        } else {
+            Err(TryRecvError::Empty)
+        }
+    }
 }
 
 /// The last reciever that's dropped will mark the channel as disconnected.
@@ -258,6 +288,7 @@ where
 }
 
 /// Producers messages to be read by [Receiver]s.
+#[derive(Debug)]
 pub struct Sender<T>
 where
     T: Send + Sync + 'static,
@@ -311,14 +342,13 @@ where
     }
 
     /// Waits until a permit is reserved or returns an when all receivers have been dropped.
-    pub async fn reserve(&self) -> Result<Permit<T>, ReserveError> {
-        let reserve = ReserveFuture::new(self.state.next_waker_id(), self.state.clone());
-
-        reserve.await
+    pub async fn reserve(&self) -> Result<Permit<'_, T>, ReserveError> {
+        ReserveFuture::new(self.state.next_waker_id(), &self.state, 1).await?;
+        Ok(Permit::new(self))
     }
 
     /// Reserves a permit or returns an when all receivers have been dropped.
-    pub fn try_reserve(&self) -> Result<Permit<T>, TryReserveError> {
+    pub fn try_reserve(&self) -> Result<Permit<'_, T>, TryReserveError> {
         let mut state = self.state.inner_mut();
 
         if state.disconnected {
@@ -327,9 +357,56 @@ where
 
         if state.has_room_for(1) {
             state.reserved_count += 1;
-            Ok(Permit::new(self.state.clone()))
+            Ok(Permit::new(self))
         } else {
             Err(TryReserveError::Full)
+        }
+    }
+
+    /// Waits until multiple Permits in the queue are reserved.
+    pub async fn reserve_many(&self, count: usize) -> Result<PermitIterator<'_, T>, ReserveError> {
+        ReserveFuture::new(self.state.next_waker_id(), &self.state, count).await?;
+        Ok(PermitIterator::new(self, count))
+    }
+
+    /// Reserves multiple Permits in the queue, or errors out when there's no room.
+    pub fn try_reserve_many(&self, count: usize) -> Result<PermitIterator<'_, T>, TryReserveError> {
+        let mut state = self.state.inner_mut();
+
+        if state.disconnected {
+            return Err(TryReserveError::Disconnected);
+        }
+
+        if state.has_room_for(count) {
+            state.reserved_count += count;
+            Ok(PermitIterator::new(self, count))
+        } else {
+            Err(TryReserveError::Full)
+        }
+    }
+
+    /// Like [Sender::reserve], but takes ownership of `Sender` until sending is done.
+    pub async fn reserve_owned(self) -> Result<OwnedPermit<T>, ReserveError> {
+        ReserveFuture::new(self.state.next_waker_id(), &self.state, 1).await?;
+        Ok(OwnedPermit::new(self))
+    }
+
+    /// Reserves a permit or returns an when all receivers have been dropped.
+    pub fn try_reserve_owned(self) -> Result<OwnedPermit<T>, TrySendError<Self>> {
+        let mut state = self.state.inner_mut();
+
+        if state.disconnected {
+            drop(state);
+            return Err(TrySendError::Disconnected(self));
+        }
+
+        if state.has_room_for(1) {
+            state.reserved_count += 1;
+            drop(state);
+            Ok(OwnedPermit::new(self))
+        } else {
+            drop(state);
+            Err(TrySendError::Full(self))
         }
     }
 }
@@ -353,7 +430,6 @@ impl<T> Clone for State<T>
 where
     T: Send + Sync + 'static,
 {
-
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -630,28 +706,28 @@ where
 }
 
 /// Permit holds a spot in the internal buffer so the message can be sent without awaiting.
-pub struct Permit<T>
+pub struct Permit<'a, T>
 where
     T: Send + Sync + 'static,
 {
-    state: State<T>,
+    sender: &'a Sender<T>,
     has_sent: bool,
 }
 
-impl<T> Permit<T>
+impl<'a, T> Permit<'a, T>
 where
     T: Send + Sync + 'static,
 {
-    fn new(state: State<T>) -> Self {
+    fn new(sender: &'a Sender<T>) -> Self {
         Self {
-            state,
+            sender,
             has_sent: false,
         }
     }
 
     /// Writes a message to the internal buffer.
     pub fn send(mut self, value: T) {
-        if let Some(waker) = self.state.inner_mut().send_and_get_waker(value) {
+        if let Some(waker) = self.sender.state.inner_mut().send_and_get_waker(value) {
             waker.wake();
         }
         self.has_sent = true;
@@ -659,44 +735,145 @@ where
     }
 }
 
-impl<T> Drop for Permit<T>
+impl<'a, T> Drop for Permit<'a, T>
 where
     T: Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        self.state.drop_permit(self.has_sent);
+        self.sender.state.drop_permit(self.has_sent);
     }
 }
 
-struct ReserveFuture<T>
+pub struct PermitIterator<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    sender: &'a Sender<T>,
+    count: usize,
+}
+
+impl<'a, T> PermitIterator<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    pub fn new(sender: &'a Sender<T>, count: usize) -> Self {
+        Self { sender, count }
+    }
+}
+
+impl<'a, T> Iterator for PermitIterator<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    type Item = Permit<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.count == 0 {
+            None
+        } else {
+            self.count -= 1;
+            Some(Permit::new(self.sender))
+        }
+    }
+}
+
+impl<'a, T> Drop for PermitIterator<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        for _ in 0..self.count {
+            self.sender.state.drop_permit(false);
+        }
+    }
+}
+
+pub struct OwnedPermit<T>
+where
+    T: Send + Sync + 'static,
+{
+    sender: Option<Sender<T>>,
+}
+
+impl<T> OwnedPermit<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn new(sender: Sender<T>) -> Self {
+        Self {
+            sender: Some(sender),
+        }
+    }
+
+    /// Writes a message to the internal buffer.
+    pub fn send(mut self, value: T) -> Sender<T> {
+        let sender = self
+            .sender
+            .take()
+            .expect("sender is only taken when permit is consumed");
+
+        if let Some(waker) = sender.state.inner_mut().send_and_get_waker(value) {
+            waker.wake();
+        }
+
+        sender.state.drop_permit(true);
+
+        sender
+    }
+
+    pub fn release(mut self) -> Sender<T> {
+        let sender = self
+            .sender
+            .take()
+            .expect("sender is only taken when permit is consumed");
+
+        sender.state.drop_permit(false);
+
+        sender
+    }
+}
+
+impl<'a, T> Drop for OwnedPermit<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        // if we haven't called send or release:
+        if let Some(sender) = &self.sender {
+            sender.state.drop_permit(false);
+        }
+    }
+}
+
+struct ReserveFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
     id: WakerId,
-    state: State<T>,
+    state: &'a State<T>,
+    count: usize,
     has_reserved: bool,
 }
 
-impl<T> ReserveFuture<T>
+impl<'a, T> ReserveFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
-    fn new(id: WakerId, state: State<T>) -> Self {
+    fn new(id: WakerId, state: &'a State<T>, count: usize) -> Self {
         Self {
             id,
             state,
+            count,
             has_reserved: false,
         }
     }
 }
 
-impl<T> Unpin for ReserveFuture<T> where T: Send + Sync + 'static {}
-
-impl<T> Future for ReserveFuture<T>
+impl<'a, T> Future for ReserveFuture<'a, T>
 where
     T: Send + Sync + 'static,
 {
-    type Output = Result<Permit<T>, ReserveError>;
+    type Output = Result<(), ReserveError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.has_reserved {
@@ -707,12 +884,10 @@ where
         let mut state = this.state.inner_mut();
         if state.disconnected {
             Poll::Ready(Err(ReserveError))
-        } else if state.has_room_for(1) {
+        } else if state.has_room_for(this.count) {
             this.has_reserved = true;
-            state.reserved_count += 1;
-            drop(state);
-            let reserved = Permit::new(self.state.clone());
-            Poll::Ready(Ok(reserved))
+            state.reserved_count += this.count;
+            Poll::Ready(Ok(()))
         } else {
             state
                 .waiting_send_futures
@@ -785,7 +960,96 @@ where
     T: Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        self.receiver.state.drop_recv_future(&self.id, self.has_received);
+        self.receiver
+            .state
+            .drop_recv_future(&self.id, self.has_received);
+    }
+}
+
+struct RecvManyFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    id: WakerId,
+    receiver: &'a Receiver<T>,
+    vec: &'a mut Vec<T>,
+    count: usize,
+    has_received: bool,
+}
+
+impl<'a, T> RecvManyFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn new(id: WakerId, receiver: &'a Receiver<T>, vec: &'a mut Vec<T>, count: usize) -> Self {
+        Self {
+            id,
+            receiver,
+            vec,
+            count,
+            has_received: false,
+        }
+    }
+}
+
+impl<'a, T> Unpin for RecvManyFuture<'a, T> where T: Send + Sync + 'static {}
+
+impl<'a, T> Future for RecvManyFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    type Output = Result<usize, RecvError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.deref_mut();
+        let mut state = this.receiver.state.inner_mut();
+
+        let value = state.buffer.pop_front();
+
+        match value {
+            Some(value) => {
+                let mut num_received = 1;
+                this.vec.push(value);
+
+                for _ in 1..this.count {
+                    match state.buffer.pop_front() {
+                        Some(value) => {
+                            this.vec.push(value);
+                            num_received += 1;
+                        }
+                        None => break,
+                    }
+                }
+
+                this.has_received = true;
+                Poll::Ready(Ok(num_received))
+            }
+            None => {
+                if state.disconnected && state.reserved_count == 0 {
+                    Poll::Ready(Err(RecvError))
+                } else {
+                    state
+                        .waiting_recv_futures
+                        .insert(this.id, cx.waker().clone());
+                    if let Some(waker) = state.take_one_send_future_waker() {
+                        drop(state);
+                        waker.wake();
+                    }
+                    Poll::Pending
+                }
+            }
+        }
+    }
+}
+
+impl<'a, T> Drop for RecvManyFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.receiver
+            .state
+            .drop_recv_future(&self.id, self.has_received);
     }
 }
 
@@ -914,12 +1178,14 @@ mod testing {
                 match tx.try_reserve() {
                     Ok(permit) => {
                         permit.send(value);
-                        return tx;
                     }
                     Err(_err) => {
                         tokio::time::sleep(Duration::ZERO).await;
+                        continue;
                     }
-                }
+                };
+
+                return tx;
             }
         })
         .await;
@@ -957,11 +1223,13 @@ mod testing {
         tx.reserve().await.expect("reserved 2");
         let task = tokio::spawn({
             let tx = tx.clone();
-            async move { tx.reserve().await }
+            async move {
+                assert!(matches!(tx.reserve().await, Err(ReserveError)));
+            }
         });
         drop(rx);
         assert!(matches!(tx.reserve().await, Err(ReserveError)));
-        assert!(matches!(task.await.expect("panic"), Err(ReserveError)));
+        task.await.expect("no panic");
     }
 
     #[test]
@@ -1058,6 +1326,71 @@ mod testing {
         assert_no_recv(&rx).await;
         drop(permit);
         assert_eq!(rx.recv().await, Err(RecvError));
+    }
+
+    #[tokio::test]
+    async fn reserve_owned() {
+        let (tx, rx) = channel::<usize>(4);
+        let tx = tx.reserve_owned().await.unwrap().send(1);
+        let tx = tx.reserve_owned().await.unwrap().send(2);
+        let tx = tx.try_reserve_owned().unwrap().send(3);
+        let tx = tx.try_reserve_owned().unwrap().release();
+        let tx = tx.try_reserve_owned().unwrap().send(4);
+        assert!(matches!(
+            tx.clone().try_reserve_owned(),
+            Err(TrySendError::Full(_))
+        ));
+        for i in 1..=4 {
+            assert_eq!(rx.try_recv().unwrap(), i);
+        }
+        drop(rx);
+        assert!(matches!(
+            tx.clone().reserve_owned().await,
+            Err(ReserveError)
+        ));
+        assert!(matches!(
+            tx.try_reserve_owned(),
+            Err(TrySendError::Disconnected(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn reserve_many() {
+        let (tx, rx) = channel::<usize>(10);
+        let p1 = tx.reserve_many(5).await.unwrap();
+        let p2 = tx.try_reserve_many(5).unwrap();
+        assert!(matches!(tx.try_send(11), Err(TrySendError::Full(11))));
+        for (i, p) in p1.enumerate() {
+            p.send(i);
+        }
+        for (i, p) in p2.enumerate() {
+            p.send(i + 5);
+        }
+        for i in 0..10 {
+            assert_eq!(rx.try_recv().unwrap(), i);
+        }
+    }
+
+    #[tokio::test]
+    async fn reserve_many_drop() {
+        let (tx, _rx) = channel::<usize>(2);
+        let it = tx.reserve_many(2).await.unwrap();
+        drop(it);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        assert!(matches!(tx.try_send(3), Err(TrySendError::Full(3))));
+    }
+
+    #[tokio::test]
+    async fn reserve_many_drop_halfway() {
+        let (tx, _rx) = channel::<usize>(4);
+        let mut it = tx.reserve_many(4).await.unwrap();
+        it.next().unwrap().send(1);
+        it.next().unwrap().send(2);
+        drop(it);
+        tx.try_send(3).unwrap();
+        tx.try_send(4).unwrap();
+        assert!(matches!(tx.try_send(5), Err(TrySendError::Full(5))));
     }
 
     async fn assert_no_recv<T>(rx: &Receiver<T>)
