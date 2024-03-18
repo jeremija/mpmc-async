@@ -566,6 +566,21 @@ where
     }
 }
 
+// TODO we need acustom impl of a LinkedList to be able to add/remove wakers, instead of using
+// WakerId.
+//
+// Moreover, currently reservations are just a counter, they don't actually take the
+// spot in the buffer, so in the case of a single consumer the result will be
+// re-ordered. We could keep an enum like this:
+//
+// ```
+// enum Spot<T> {
+//   Value(T),
+//   Reserved,
+// }
+// ```
+//
+// in the buffer so that we know we need to wait for the reservations.
 #[derive(Debug)]
 struct InnerState<T> {
     /// Buffered messages, capacity is fixed.
@@ -619,12 +634,20 @@ where
 
     #[must_use]
     fn take_one_send_future_waker(&mut self) -> Option<Waker> {
-        Self::take_one_waker(&mut self.waiting_send_futures)
+        if self.has_room_for(1) {
+            Self::take_one_waker(&mut self.waiting_send_futures)
+        } else {
+            None
+        }
     }
 
     #[must_use]
     fn take_one_recv_future_waker(&mut self) -> Option<Waker> {
-        Self::take_one_waker(&mut self.waiting_recv_futures)
+        if !self.buffer.is_empty() {
+            Self::take_one_waker(&mut self.waiting_recv_futures)
+        } else {
+            None
+        }
     }
 
     #[must_use]
