@@ -72,6 +72,8 @@
 //!     assert_eq!(exp, got);
 //! });
 //! ```
+mod linked_list;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Display;
 use std::ops::DerefMut;
