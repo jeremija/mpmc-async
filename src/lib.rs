@@ -1,3 +1,6 @@
+use self::queue::Spot;
+use self::state::State;
+
 ///! A multi-producer, multi-consumer async channel with reservations.
 ///!
 ///! Example usage:
@@ -74,168 +77,164 @@
 ///! ```
 pub mod linked_list;
 pub mod queue;
+pub mod state;
 
-// use std::collections::{BTreeMap, VecDeque};
-//use std::fmt::Display;
-//use std::ops::DerefMut;
-//use std::pin::Pin;
-//use std::sync::{Arc, Mutex};
-//use std::task::{Context, Poll, Waker};
+use self::linked_list::NodeRef;
+use self::state::SendWaker;
 
-//use std::future::Future;
+use std::fmt::Display;
+use std::ops::DerefMut;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-//use self::linked_list::{LinkedList, NodeRef};
+use std::future::Future;
 
-///// Occurs when all receivers have been dropped.
-//#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-//pub struct SendError<T>(pub T);
+/// Occurs when all receivers have been dropped.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct SendError<T>(pub T);
 
-//impl<T> Display for SendError<T> {
-//    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//        f.write_str("Send failed: disconnected")
-//    }
-//}
+impl<T> Display for SendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Send failed: disconnected")
+    }
+}
 
-///// TrySendError occurs when the channel is empty or all receivers have been dropped.
-//#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-//pub enum TrySendError<T> {
-//    /// Channel full
-//    Full(T),
-//    /// Disconnected
-//    Disconnected(T),
-//}
+/// TrySendError occurs when the channel is empty or all receivers have been dropped.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TrySendError<T> {
+    /// Channel full
+    Full(T),
+    /// Disconnected
+    Disconnected(T),
+}
 
-//impl<T> Display for TrySendError<T> {
-//    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//        match self {
-//            TrySendError::Full(_) => f.write_str("Try send failed: full"),
-//            TrySendError::Disconnected(_) => f.write_str("Try send failed: disconnected"),
-//        }
-//    }
-//}
+impl<T> Display for TrySendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrySendError::Full(_) => f.write_str("Try send failed: full"),
+            TrySendError::Disconnected(_) => f.write_str("Try send failed: disconnected"),
+        }
+    }
+}
 
-///// Occurs when all receivers have been dropped.
-//#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-//pub struct ReserveError;
+/// Occurs when all receivers have been dropped.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct ReserveError;
 
-//impl Display for ReserveError {
-//    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//        f.write_str("Reserve failed: disconnected")
-//    }
-//}
+impl Display for ReserveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Reserve failed: disconnected")
+    }
+}
 
-///// Occurs when the channel is full, or all receivers have been dropped.
-//#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-//pub enum TryReserveError {
-//    /// Channel full
-//    Full,
-//    /// Disconnected
-//    Disconnected,
-//}
+impl ReserveError {
+    fn into_send_error<T>(self, value: T) -> SendError<T> {
+        SendError(value)
+    }
+}
 
-//impl TryReserveError {
-//    fn into_try_send_error<T>(self, value: T) -> TrySendError<T> {
-//        match self {
-//            TryReserveError::Full => TrySendError::Full(value),
-//            TryReserveError::Disconnected => TrySendError::Disconnected(value),
-//        }
-//    }
-//}
+/// Occurs when the channel is full, or all receivers have been dropped.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TryReserveError {
+    /// Channel full
+    Full,
+    /// Disconnected
+    Disconnected,
+}
 
-//impl Display for TryReserveError {
-//    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//        match self {
-//            TryReserveError::Full => f.write_str("Try send failed: full"),
-//            TryReserveError::Disconnected => f.write_str("Try send failed: disconnected"),
-//        }
-//    }
-//}
+impl TryReserveError {
+    fn into_try_send_error<T>(self, value: T) -> TrySendError<T> {
+        match self {
+            TryReserveError::Full => TrySendError::Full(value),
+            TryReserveError::Disconnected => TrySendError::Disconnected(value),
+        }
+    }
+}
 
-///// Occurs when all senders have been dropped.
-//#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-//pub struct RecvError;
+impl Display for TryReserveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TryReserveError::Full => f.write_str("Try send failed: full"),
+            TryReserveError::Disconnected => f.write_str("Try send failed: disconnected"),
+        }
+    }
+}
 
-//impl Display for RecvError {
-//    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//        f.write_str("Recv failed: disconnected")
-//    }
-//}
+/// Occurs when all senders have been dropped.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct RecvError;
 
-///// Occurs when channel is empty or all senders have been dropped.
-//#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-//pub enum TryRecvError {
-//    /// Channel is empty
-//    Empty,
-//    /// Disconnected
-//    Disconnected,
-//}
+impl Display for RecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Recv failed: disconnected")
+    }
+}
 
-//impl Display for TryRecvError {
-//    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//        match self {
-//            TryRecvError::Empty => f.write_str("Try recv failed: empty"),
-//            TryRecvError::Disconnected => f.write_str("Try recv failed: disconnected"),
-//        }
-//    }
-//}
+/// Occurs when channel is empty or all senders have been dropped.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TryRecvError {
+    /// Channel is empty
+    Empty,
+    /// Disconnected
+    Disconnected,
+}
 
-///// Creates a new bounded channel. When `cap` is 0 it will be increased to 1.
-//pub fn channel<T>(mut cap: usize) -> (Sender<T>, Receiver<T>)
-//where
-//    T: Send + Sync + 'static,
-//{
-//    if cap == 0 {
-//        cap = 1
-//    }
+impl Display for TryRecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TryRecvError::Empty => f.write_str("Try recv failed: empty"),
+            TryRecvError::Disconnected => f.write_str("Try recv failed: disconnected"),
+        }
+    }
+}
 
-//    let state = State {
-//        inner: Arc::new(Mutex::new(InnerState {
-//            buffer: VecDeque::with_capacity(cap),
-//            reserved_count: 0,
-//            receivers_count: 0,
-//            senders_count: 0,
-//            waiting_send_futures: LinkedList::new(),
-//            waiting_recv_futures: LinkedList::new(),
-//            disconnected: false,
-//        })),
-//    };
+/// Creates a new bounded channel. When `cap` is 0 it will be increased to 1.
+pub fn channel<T>(mut cap: usize) -> (Sender<T>, Receiver<T>)
+where
+    T: Send + Sync + 'static,
+{
+    if cap == 0 {
+        cap = 1
+    }
 
-//    (state.new_sender(), state.new_receiver())
-//}
+    let state = State::new(cap);
 
-///// Receives messages sent by [Sender].
-//pub struct Receiver<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    state: State<T>,
-//}
+    (state.new_sender(), state.new_receiver())
+}
 
-///// Cloning creates new a instance with the shared state  and increases the internal reference
-///// counter. It is guaranteed that a single message will be distributed to exacly one receiver
-///// future awaited after calling `recv()`.
-//impl<T> Clone for Receiver<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn clone(&self) -> Self {
-//        self.state.new_receiver()
-//    }
-//}
+/// Receives messages sent by [Sender].
+pub struct Receiver<T>
+where
+    T: Send + Sync + 'static,
+{
+    state: State<T>,
+}
 
-//impl<T> Receiver<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn new(state: State<T>) -> Self {
-//        Self { state }
-//    }
+/// Cloning creates new a instance with the shared state  and increases the internal reference
+/// counter. It is guaranteed that a single message will be distributed to exacly one receiver
+/// future awaited after calling `recv()`.
+impl<T> Clone for Receiver<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        self.state.new_receiver()
+    }
+}
 
-//    /// Disconnects all receivers from senders. The receivers will still receive all buffered
-//    /// or reserved messages before returning an error, allowing a graceful teardown.
-//    pub fn close_all(&self) {
-//        self.state.close_all_receivers();
-//    }
+impl<T> Receiver<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn new(state: State<T>) -> Self {
+        Self { state }
+    }
+
+    /// Disconnects all receivers from senders. The receivers will still receive all buffered
+    /// or reserved messages before returning an error, allowing a graceful teardown.
+    pub fn close_all(&self) {
+        self.state.close_all_receivers();
+    }
 
 //    /// Waits until there's a message to be read and returns. Returns an error when there are no
 //    /// more messages in the queue and all [Sender]s have been dropped.
@@ -288,682 +287,299 @@ pub mod queue;
 //            Err(TryRecvError::Empty)
 //        }
 //    }
-//}
-
-///// The last reciever that's dropped will mark the channel as disconnected.
-//impl<T> Drop for Receiver<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn drop(&mut self) {
-//        self.state.drop_receiver();
-//    }
-//}
-
-///// Producers messages to be read by [Receiver]s.
-//#[derive(Debug)]
-//pub struct Sender<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    state: State<T>,
-//}
-
-///// Cloning creates new a instance with the shared state  and increases the internal reference
-///// counter.
-//impl<T> Clone for Sender<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn clone(&self) -> Self {
-//        self.state.new_sender()
-//    }
-//}
-
-//impl<T> Sender<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn new(state: State<T>) -> Sender<T> {
-//        Self { state }
-//    }
-
-//    /// Waits until the value is sent or returns an when all receivers have been dropped.
-//    pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
-//        match self.reserve().await {
-//            Ok(permit) => {
-//                permit.send(value);
-//                Ok(())
-//            }
-//            Err(err) => Err(err.into_try_send_error(value)),
-//        }
-//    }
-
-//    /// Sends without blocking or returns an when all receivers have been dropped.
-//    pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
-//        let mut state = self.state.inner_mut();
-
-//        if state.disconnected {
-//            return Err(TrySendError::Disconnected(value));
-//        }
-
-//        if state.has_room_for(1) {
-//            if let Some(waker) = state.send_and_get_waker(value) {
-//                drop(state);
-//                waker.wake();
-//            }
-//            Ok(())
-//        } else {
-//            Err(TrySendError::Full(value))
-//        }
-//    }
-
-//    /// Waits until a permit is reserved or returns an when all receivers have been dropped.
-//    pub async fn reserve(&self) -> Result<Permit<'_, T>, ReserveError> {
-//        ReserveFuture::new(self.state.next_waker_id(), &self.state, 1).await?;
-//        Ok(Permit::new(self))
-//    }
-
-//    /// Reserves a permit or returns an when all receivers have been dropped.
-//    pub fn try_reserve(&self) -> Result<Permit<'_, T>, TryReserveError> {
-//        let mut state = self.state.inner_mut();
-
-//        if state.disconnected {
-//            return Err(TryReserveError::Disconnected);
-//        }
-
-//        if state.has_room_for(1) {
-//            state.reserved_count += 1;
-//            Ok(Permit::new(self))
-//        } else {
-//            Err(TryReserveError::Full)
-//        }
-//    }
-
-//    /// Waits until multiple Permits in the queue are reserved.
-//    pub async fn reserve_many(&self, count: usize) -> Result<PermitIterator<'_, T>, ReserveError> {
-//        ReserveFuture::new(self.state.next_waker_id(), &self.state, count).await?;
-//        Ok(PermitIterator::new(self, count))
-//    }
-
-//    /// Reserves multiple Permits in the queue, or errors out when there's no room.
-//    pub fn try_reserve_many(&self, count: usize) -> Result<PermitIterator<'_, T>, TryReserveError> {
-//        let mut state = self.state.inner_mut();
-
-//        if state.disconnected {
-//            return Err(TryReserveError::Disconnected);
-//        }
-
-//        if state.has_room_for(count) {
-//            state.reserved_count += count;
-//            Ok(PermitIterator::new(self, count))
-//        } else {
-//            Err(TryReserveError::Full)
-//        }
-//    }
-
-//    /// Like [Sender::reserve], but takes ownership of `Sender` until sending is done.
-//    pub async fn reserve_owned(self) -> Result<OwnedPermit<T>, ReserveError> {
-//        ReserveFuture::new(self.state.next_waker_id(), &self.state, 1).await?;
-//        Ok(OwnedPermit::new(self))
-//    }
-
-//    /// Reserves a permit or returns an when all receivers have been dropped.
-//    pub fn try_reserve_owned(self) -> Result<OwnedPermit<T>, TrySendError<Self>> {
-//        let mut state = self.state.inner_mut();
-
-//        if state.disconnected {
-//            drop(state);
-//            return Err(TrySendError::Disconnected(self));
-//        }
-
-//        if state.has_room_for(1) {
-//            state.reserved_count += 1;
-//            drop(state);
-//            Ok(OwnedPermit::new(self))
-//        } else {
-//            drop(state);
-//            Err(TrySendError::Full(self))
-//        }
-//    }
-//}
-
-///// The last sender that's dropped will mark the channel as disconnected.
-//impl<T> Drop for Sender<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn drop(&mut self) {
-//        self.state.drop_sender();
-//    }
-//}
-
-//#[derive(Debug)]
-//struct State<T> {
-//    inner: Arc<Mutex<InnerState<T>>>,
-//}
-
-//impl<T> Clone for State<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn clone(&self) -> Self {
-//        Self {
-//            inner: Arc::clone(&self.inner),
-//        }
-//    }
-//}
-
-//impl<T> State<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn inner_mut(&self) -> impl DerefMut<Target = InnerState<T>> + '_ {
-//        self.inner.lock().unwrap()
-//    }
-
-//    fn next_waker_id(&self) -> WakerId {
-//        self.inner_mut().next_waker_id()
-//    }
-
-//    fn new_sender(&self) -> Sender<T> {
-//        self.inner_mut().senders_count += 1;
-//        Sender::new(self.clone())
-//    }
-
-//    fn new_receiver(&self) -> Receiver<T> {
-//        self.inner_mut().receivers_count += 1;
-//        Receiver::new(self.clone())
-//    }
-
-//    fn wake_all(wakers: Option<impl Iterator<Item = Waker>>) {
-//        if let Some(wakers) = wakers {
-//            for waker in wakers {
-//                waker.wake()
-//            }
-//        }
-//    }
-
-//    fn close_all_receivers(&self) {
-//        let (send_wakers, recv_wakers) = {
-//            let mut inner = self.inner_mut();
-//            let send_wakers = inner.mark_disconnected_and_take_send_futures();
-//            // Keep receivers alive in case there are any active Permits.
-//            let recv_wakers = (inner.reserved_count == 0)
-//                .then(|| inner.mark_disconnected_and_take_recv_futures());
-
-//            (send_wakers, recv_wakers)
-//        };
-
-//        Self::wake_all(Some(send_wakers));
-//        Self::wake_all(recv_wakers);
-//    }
-
-//    fn drop_sender(&self) {
-//        let wakers = {
-//            let mut inner = self.inner_mut();
-//            inner.senders_count -= 1;
-
-//            (inner.senders_count == 0).then(|| inner.mark_disconnected_and_take_recv_futures())
-//        };
-
-//        Self::wake_all(wakers);
-//    }
-
-//    fn drop_receiver(&self) {
-//        let wakers = {
-//            let mut inner = self.inner_mut();
-//            inner.receivers_count -= 1;
-
-//            (inner.receivers_count == 0).then(|| inner.mark_disconnected_and_take_send_futures())
-//        };
-
-//        Self::wake_all(wakers);
-//    }
-
-//    fn drop_permit(&self, has_sent: bool) {
-//        let waker = {
-//            let mut inner = self.inner_mut();
-//            inner.reserved_count -= 1;
-
-//            // When the permit was not used for sending, it means a spot was freed, so we can notify
-//            // one of the senders to proceed.
-//            (!has_sent)
-//                .then(|| inner.waiting_send_futures.pop_first())
-//                .flatten()
-//        };
-
-//        if let Some((_, waker)) = waker {
-//            waker.wake();
-//        }
-//    }
-
-//    fn drop_send_future(&self, fut: Option<NodeRef<SendWaiting>>) {
-//        let waker = {
-//            let mut inner = self.inner_mut();
-
-//            if let Some(fut) = fut {
-//                inner.waiting_send_futures.remove(fut);
-//                inner.reserved_count -= fut.count
-//            }
-
-//            // If there's room for the next sender in the queue, wake it.
-//            match inner.waiting_send_futures.head() {
-//                Some(next) => inner.has_room_for(next.count).then(|| next.waker.clone()),
-//                None => None,
-//            }
-//        };
-
-//        if let Some(waker) = waker {
-//            waker.wake();
-//        }
-//    }
-
-//    fn drop_recv_future(&self, id: &WakerId, has_received: bool) {
-//        let waker = {
-//            let mut inner = self.inner_mut();
-//            let was_awoken = inner.waiting_recv_futures.remove(id).is_none();
-
-//            // Wake another receiver in case this one has been awoken, but it was dropped before it
-//            // managed to receive anything.
-//            if was_awoken {
-//                if has_received {
-//                    // If we have received, it means a spot was freed in the internal buffer, so wake
-//                    // one sender.
-//                    inner.take_one_send_future_waker()
-//                } else {
-//                    // If we have not received, it means another RecvFuture might take over.
-//                    inner.take_one_recv_future_waker()
-//                }
-//            } else {
-//                None
-//            }
-//        };
-
-//        if let Some(waker) = waker {
-//            waker.wake();
-//        }
-//    }
-//}
-
-//struct SendWaiting {
-//    count: usize,
-//    waker: Waker,
-//}
-
-//impl SendWaiting {
-//    fn new(count: usize, waker: Waker) -> Self {
-//        Self {
-//            count,
-//            waker
-//        }
-//    }
-//}
-
-//// TODO we need acustom impl of a LinkedList to be able to add/remove wakers, instead of using
-//// WakerId.
-////
-//// Moreover, currently reservations are just a counter, they don't actually take the
-//// spot in the buffer, so in the case of a single consumer the result will be
-//// re-ordered. We could keep an enum like this:
-////
-//// ```
-//// enum Spot<T> {
-////   Value(T),
-////   Reserved,
-//// }
-//// ```
-////
-//// in the buffer so that we know we need to wait for the reservations.
-//struct InnerState<T> {
-//    /// Next message ready to be received.
-//    next: Option<T>,
-//    /// Buffered messages, capacity is fixed.
-//    buffer: VecDeque<T>,
-//    /// All reservations.
-//    reservations: LinkedList<Message<T>>,
-//    cap: usize,
-//    len: usize,
-//    /// Total of created receivers.
-//    receivers_count: usize,
-//    /// Total of created senders.
-//    senders_count: usize,
-//    /// Senders waiting to send.
-//    waiting_send_futures: LinkedList<SendWaiting>,
-//    /// Receivers waiting to receive.
-//    waiting_recv_futures: LinkedList<Waker>,
-//    /// False by default, true when all senders or all receivers are dropped.
-//    disconnected: bool,
-//}
-
-//impl<T> InnerState<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn has_room_for(&self, required_num_items: usize) -> bool {
-//        let space = self.buffer.capacity() - self.buffer.len();
-//        space >= required_num_items
-//    }
-
-//    #[must_use]
-//    fn send_and_get_receiver_waker(&mut self, value: T, waker: NodeRef<SendWaiting>) -> Option<&Waker> {
-//        self.buffer.push_back(value);
-//        self.waiting_send_futures.remove(waker);
-//        self.waiting_recv_futures.head()
-//    }
-
-//    fn mark_disconnected_and_take_send_futures(&mut self) -> impl Iterator<Item = Waker> {
-//        self.disconnected = true;
-//        Self::take_all_wakers(&mut self.waiting_send_futures).into_values()
-//    }
-
-//    fn mark_disconnected_and_take_recv_futures(&mut self) -> impl Iterator<Item = Waker> {
-//        self.disconnected = true;
-//        Self::take_all_wakers(&mut self.waiting_recv_futures).into_values()
-//    }
-
-//    #[must_use]
-//    fn take_one_send_future_waker(&mut self) -> Option<Waker> {
-//        if self.has_room_for(1) {
-//            Self::take_one_waker(&mut self.waiting_send_futures)
-//        } else {
-//            None
-//        }
-//    }
-
-//    #[must_use]
-//    fn take_one_recv_future_waker(&mut self) -> Option<Waker> {
-//        if !self.buffer.is_empty() {
-//            Self::take_one_waker(&mut self.waiting_recv_futures)
-//        } else {
-//            None
-//        }
-//    }
-
-//    #[must_use]
-//    fn take_one_waker(map: &mut BTreeMap<WakerId, Waker>) -> Option<Waker> {
-//        map.pop_first().map(|(_, waker)| waker)
-//    }
-
-//    fn take_all_wakers(map: &mut BTreeMap<WakerId, Waker>) -> BTreeMap<WakerId, Waker> {
-//        std::mem::take(map)
-//    }
-//}
-
-//enum Message<T> {
-//    Value(T),
-//    Reserved,
-//}
-
-//type WakerId = usize;
-
-//// struct SendFuture<'a, T>
-//// where
-////     T: Send + Sync + 'static,
-//// {
-////     sender: &'a Sender<T>,
-////     position: Option<NodeRef<Waker>>,
-////     value: Option<T>,
-//// }
-
-//// impl<'a, T> SendFuture<'a, T>
-//// where
-////     T: Send + Sync + 'static,
-//// {
-////     fn new(sender: &'a Sender<T>, value: T) -> Self {
-////         Self {
-////             sender,
-////             position: None,
-////             value: Some(value),
-////         }
-////     }
-//// }
-
-//// impl<'a, T> Unpin for SendFuture<'a, T> where T: Send + Sync + 'static {}
-
-//// impl<'a, T> Future for SendFuture<'a, T>
-//// where
-////     T: Send + Sync + 'static,
-//// {
-////     type Output = Result<(), SendError<T>>;
-
-////     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-////         // Already sent this value.
-////         if self.value.is_none() {
-////             return Poll::Ready(Ok(()));
-////         }
-
-////         let this = self.deref_mut();
-////         let mut state = this.sender.state.inner_mut();
-
-////         if state.disconnected {
-////             Poll::Ready(Err(SendError(this.value.take().expect("some value"))))
-////         } else if state.has_room_for(1) {
-////             if let Some(waker) = state.send_get_receiver_waker(
-////                 this.value.take().expect("some value"),
-////                 this.position.take().expect("position"),
-////             ) {
-////                 drop(state);
-////                 waker.wake();
-////             }
-////             Poll::Ready(Ok(()))
-////         } else if self.position.is_none() {
-////             let position = state
-////                 .waiting_send_futures
-////                 .push(cx.waker().clone());
-////             self.position = Some(position);
-////             Poll::Pending
-////         } else {
-////             Poll::Pending
-////         }
-////     }
-//// }
-
-//// impl<'a, T> Drop for SendFuture<'a, T>
-//// where
-////     T: Send + Sync + 'static,
-//// {
-////     fn drop(&mut self) {
-////         let has_sent = self.value.is_none();
-////         self.sender.state.drop_send_future(self.position.take());
-////     }
-//// }
-
-///// Permit holds a spot in the internal buffer so the message can be sent without awaiting.
-//pub struct Permit<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    sender: &'a Sender<T>,
-//    node_ref: NodeRef<Message<T>>,
-//    has_sent: bool,
-//}
-
-//impl<'a, T> Permit<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn new(sender: &'a Sender<T>) -> Self {
-//        Self {
-//            sender,
-//            has_sent: false,
-//        }
-//    }
-
-//    /// Writes a message to the internal buffer.
-//    pub fn send(mut self, value: T) {
-//        if let Some(waker) = self.sender.state.inner_mut().send_and_get_waker(value) {
-//            waker.wake();
-//        }
-//        self.has_sent = true;
-//        drop(self)
-//    }
-//}
-
-//impl<'a, T> Drop for Permit<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn drop(&mut self) {
-//        self.sender.state.drop_permit(self.has_sent);
-//    }
-//}
-
-//pub struct PermitIterator<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    sender: &'a Sender<T>,
-//    count: usize,
-//}
-
-//impl<'a, T> PermitIterator<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    pub fn new(sender: &'a Sender<T>, count: usize) -> Self {
-//        Self { sender, count }
-//    }
-//}
-
-//impl<'a, T> Iterator for PermitIterator<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    type Item = Permit<'a, T>;
-
-//    fn next(&mut self) -> Option<Self::Item> {
-//        if self.count == 0 {
-//            None
-//        } else {
-//            self.count -= 1;
-//            Some(Permit::new(self.sender))
-//        }
-//    }
-//}
-
-//impl<'a, T> Drop for PermitIterator<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn drop(&mut self) {
-//        for _ in 0..self.count {
-//            self.sender.state.drop_permit(false);
-//        }
-//    }
-//}
-
-//pub struct OwnedPermit<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    sender: Option<Sender<T>>,
-//}
-
-//impl<T> OwnedPermit<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn new(sender: Sender<T>) -> Self {
-//        Self {
-//            sender: Some(sender),
-//        }
-//    }
-
-//    /// Writes a message to the internal buffer.
-//    pub fn send(mut self, value: T) -> Sender<T> {
-//        let sender = self
-//            .sender
-//            .take()
-//            .expect("sender is only taken when permit is consumed");
-
-//        if let Some(waker) = sender.state.inner_mut().send_and_get_waker(value) {
-//            waker.wake();
-//        }
-
-//        sender.state.drop_permit(true);
-
-//        sender
-//    }
-
-//    pub fn release(mut self) -> Sender<T> {
-//        let sender = self
-//            .sender
-//            .take()
-//            .expect("sender is only taken when permit is consumed");
-
-//        sender.state.drop_permit(false);
-
-//        sender
-//    }
-//}
-
-//impl<T> Drop for OwnedPermit<T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn drop(&mut self) {
-//        // if we haven't called send or release:
-//        if let Some(sender) = &self.sender {
-//            sender.state.drop_permit(false);
-//        }
-//    }
-//}
-
-//struct ReserveFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    id: WakerId,
-//    waiting: Option<NodeRef<SendWaiting>>,
-//    state: &'a State<T>,
-//    count: usize,
-//}
-
-//impl<'a, T> ReserveFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn new(id: WakerId, state: &'a State<T>, count: usize) -> Self {
-//        Self {
-//            id,
-//            state,
-//            count,
-//            has_reserved: false,
-//        }
-//    }
-//}
-
-//impl<'a, T> Future for ReserveFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    type Output = Result<(), ReserveError>;
-
-//    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-//        if self.has_reserved {
-//            panic!("ReservedFuture polled after ready");
-//        }
-
-//        let this = self.deref_mut();
-//        let mut state = this.state.inner_mut();
-//        if state.disconnected {
-//            Poll::Ready(Err(ReserveError))
-//        } else if state.has_room_for(this.count) {
-//            state.buffer.push(Message::Reserved);
-//            state.reserved_count += this.count;
-//            Poll::Ready(Ok(()))
-//        } else if self.waiting.is_none() {
-//            let waiting = state
-//                .waiting_send_futures
-//                .push(SendWaiting::new(self.count, cx.waker().clone()));
-//            self.waiting = Some(waiting);
-//            Poll::Pending
-//        } else {
-//            Poll::Pending
-//        }
-//    }
-//}
+}
+
+/// The last reciever that's dropped will mark the channel as disconnected.
+impl<T> Drop for Receiver<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.state.drop_receiver();
+    }
+}
+
+/// Producers messages to be read by [Receiver]s.
+pub struct Sender<T>
+where
+    T: Send + Sync + 'static,
+{
+    state: State<T>,
+}
+
+/// Cloning creates new a instance with the shared state  and increases the internal reference
+/// counter.
+impl<T> Clone for Sender<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        self.state.new_sender()
+    }
+}
+
+impl<T> Sender<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn new(state: State<T>) -> Sender<T> {
+        Self { state }
+    }
+
+    /// Waits until the value is sent or returns an when all receivers have been dropped.
+    pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
+        match self.reserve().await {
+            Ok(permit) => {
+                permit.send(value);
+                Ok(())
+            }
+            Err(err) => Err(err.into_send_error(value)),
+        }
+    }
+
+    /// Sends without blocking or returns an when all receivers have been dropped.
+    pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
+        match self.try_reserve() {
+            Ok(permit) => {
+                permit.send(value);
+                Ok(())
+            }
+            Err(err) => Err(err.into_try_send_error(value)),
+        }
+    }
+
+    /// Waits until a permit is reserved or returns an when all receivers have been dropped.
+    pub async fn reserve(&self) -> Result<Permit<'_, T>, ReserveError> {
+        let reservation = ReserveFuture::new(&self.state, 1).await?;
+        Ok(Permit::new(self, reservation))
+    }
+
+    /// Reserves a permit or returns an when all receivers have been dropped.
+    pub fn try_reserve(&self) -> Result<Permit<'_, T>, TryReserveError> {
+        let reservation = self.state.try_reserve(1)?;
+        Ok(Permit::new(self, reservation))
+    }
+
+    /// Waits until multiple Permits in the queue are reserved.
+    pub async fn reserve_many(&self, count: usize) -> Result<PermitIterator<'_, T>, ReserveError> {
+        let reservation = ReserveFuture::new(&self.state, count).await?;
+        Ok(PermitIterator::new(self, reservation, count))
+    }
+
+    /// Reserves multiple Permits in the queue, or errors out when there's no room.
+    pub fn try_reserve_many(&self, count: usize) -> Result<PermitIterator<'_, T>, TryReserveError> {
+        let reservation = self.state.try_reserve(count)?;
+        Ok(PermitIterator::new(self, reservation, count))
+    }
+
+    /// Like [Sender::reserve], but takes ownership of `Sender` until sending is done.
+    pub async fn reserve_owned(self) -> Result<OwnedPermit<T>, ReserveError> {
+        let reservation = ReserveFuture::new(&self.state, 1).await?;
+        Ok(OwnedPermit::new(self, reservation))
+    }
+
+    /// Reserves a permit or returns an when all receivers have been dropped.
+    pub fn try_reserve_owned(self) -> Result<OwnedPermit<T>, TrySendError<Self>> {
+        let reservation = match self.state.try_reserve(1) {
+            Ok(reservation) => reservation,
+            Err(TryReserveError::Disconnected) => return Err(TrySendError::Disconnected(self)),
+            Err(TryReserveError::Full) => return Err(TrySendError::Full(self)),
+        };
+        Ok(OwnedPermit::new(self, reservation))
+    }
+}
+
+/// The last sender that's dropped will mark the channel as disconnected.
+impl<T> Drop for Sender<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.state.drop_sender();
+    }
+}
+
+/// Permit holds a spot in the internal buffer so the message can be sent without awaiting.
+pub struct Permit<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    sender: &'a Sender<T>,
+    reservation: Option<NodeRef<Spot<T>>>,
+}
+
+impl<'a, T> Permit<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn new(sender: &'a Sender<T>, reservation: NodeRef<Spot<T>>) -> Self {
+        Self {
+            sender,
+            reservation: Some(reservation),
+        }
+    }
+
+    /// Writes a message to the internal buffer.
+    pub fn send(mut self, value: T) {
+        let reservation = self.reservation.take().expect("reservation");
+        self.sender.state.send_with_permit(reservation, value);
+    }
+}
+
+impl<'a, T> Drop for Permit<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            self.sender.state.drop_permit(reservation, 1);
+        }
+    }
+}
+
+pub struct PermitIterator<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    sender: &'a Sender<T>,
+    reservation: Option<NodeRef<Spot<T>>>,
+    count: usize,
+}
+
+impl<'a, T> PermitIterator<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    pub fn new(sender: &'a Sender<T>, reservation: NodeRef<Spot<T>>, count: usize) -> Self {
+        Self {
+            sender,
+            reservation: Some(reservation),
+            count,
+        }
+    }
+}
+
+impl<'a, T> Iterator for PermitIterator<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    type Item = Permit<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.count == 0 {
+            None
+        } else {
+            self.count -= 1;
+
+            let reservation = if self.count == 0 {
+                self.reservation.take().expect("reservation")
+            } else {
+                self.reservation.clone().expect("reservation")
+            };
+
+            Some(Permit::new(self.sender, reservation))
+        }
+    }
+}
+
+impl<'a, T> Drop for PermitIterator<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            self.sender.state.drop_permit(reservation, self.count);
+        }
+    }
+}
+
+pub struct OwnedPermit<T>
+where
+    T: Send + Sync + 'static,
+{
+    sender_and_reservation: Option<(Sender<T>, NodeRef<Spot<T>>)>,
+}
+
+impl<T> OwnedPermit<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn new(sender: Sender<T>, reservation: NodeRef<Spot<T>>) -> Self {
+        Self {
+            sender_and_reservation: Some((sender, reservation)),
+        }
+    }
+
+    /// Writes a message to the internal buffer.
+    pub fn send(mut self, value: T) -> Sender<T> {
+        let (sender, reservation) = self
+            .sender_and_reservation
+            .take()
+            .expect("sender and reservation");
+
+        sender.state.send_with_permit(reservation, value);
+
+        sender
+    }
+
+    pub fn release(mut self) -> Sender<T> {
+        let (sender, reservation) = self
+            .sender_and_reservation
+            .take()
+            .expect("sender and reservation");
+
+        sender.state.drop_permit(reservation, 1);
+
+        sender
+    }
+}
+
+impl<T> Drop for OwnedPermit<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        // if we haven't called send or release:
+        if let Some((sender, reservation)) = self.sender_and_reservation.take() {
+            sender.state.drop_permit(reservation, 1);
+        }
+    }
+}
+
+struct ReserveFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    state: &'a State<T>,
+    count: usize,
+    waiting: Option<NodeRef<SendWaker>>,
+}
+
+impl<'a, T> ReserveFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn new(state: &'a State<T>, count: usize) -> Self {
+        Self {
+            state,
+            count,
+            waiting: None,
+        }
+    }
+}
+
+impl<'a, T> Future for ReserveFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    type Output = Result<NodeRef<Spot<T>>, ReserveError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.deref_mut();
+
+        this.state.reserve(this.count, cx, &mut this.waiting)
+    }
+}
 
 //struct RecvFuture<'a, T>
 //where

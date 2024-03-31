@@ -15,6 +15,12 @@ pub struct LinkedList<T> {
     len: usize,
 }
 
+impl<T> Default for LinkedList<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> LinkedList<T> {
     pub fn new() -> Self {
         Self {
@@ -286,6 +292,12 @@ impl<T> LinkedList<T> {
         })
     }
 
+    /// Returns an iterator.
+    pub fn into_iter(self) -> IntoIter<T> {
+        IntoIter::new(self)
+    }
+
+
     /// Removes the element by reference.
     ///
     /// Returns [None] when the item is no longer part of the list.
@@ -334,6 +346,16 @@ impl<'a, T> IntoIterator for &'a LinkedList<T> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl<T> IntoIterator for LinkedList<T> {
+    type Item = T;
+
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_iter()
     }
 }
 
@@ -399,6 +421,33 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
         Some(&node.value)
     }
 }
+
+pub struct IntoIter<T> {
+     list: LinkedList<T>,
+}
+
+impl<'a, T> IntoIter<T> {
+    fn new(list: LinkedList<T>) -> Self {
+        Self {
+            list,
+        }
+    }
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        self.list.pop_head()
+    }
+}
+
+impl<T> DoubleEndedIterator for IntoIter<T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.list.pop_tail()
+    }
+}
+
 
 #[derive(Clone)]
 struct HeadTail<T> {

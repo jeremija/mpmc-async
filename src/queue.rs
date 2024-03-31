@@ -13,8 +13,13 @@ pub struct Queue<T> {
 }
 
 impl<T> Queue<T> {
-    /// Creates a new instance with the provided capacity.
-    pub fn new(cap: usize) -> Self {
+    /// Creates a new instance with the provided capacity. When cap is zero it will be increased to
+    /// 1.
+    pub fn new(mut cap: usize) -> Self {
+        if cap == 0 {
+            cap = 1
+        }
+
         Self {
             list: LinkedList::new(),
             len: 0,
@@ -32,9 +37,13 @@ impl<T> Queue<T> {
         self.cap
     }
 
+    pub fn has_room_for(&self, count: usize) -> bool {
+        self.len + count <= self.cap
+    }
+
     /// Attempts to reserve a number of spots in the queue if there is room.
     pub fn try_reserve(&mut self, count: usize) -> Option<NodeRef<Spot<T>>> {
-        if self.len + count > self.cap {
+        if !self.has_room_for(count) {
             return None;
         }
 
@@ -44,7 +53,7 @@ impl<T> Queue<T> {
     }
 
     /// Reads the next ready value, if any.
-    pub fn read_next_value(&mut self) -> Option<T> {
+    pub fn get_next(&mut self) -> Option<T> {
         let Spot::Value(_) = self.list.head()? else {
             return None;
         };
@@ -58,10 +67,10 @@ impl<T> Queue<T> {
     }
 
     /// Replaces a single reserved spots with a value.
-    pub fn write(&mut self, reservation: &NodeRef<Spot<T>>, value: T) {
+    pub fn send(&mut self, reservation: NodeRef<Spot<T>>, value: T) {
         let spot = self
             .list
-            .get_mut(reservation)
+            .get_mut(&reservation)
             .expect("reservation not found");
 
         let count = match spot {
@@ -81,60 +90,36 @@ impl<T> Queue<T> {
             *spot = value;
         } else {
             self.list
-                .push_before(reservation, value)
+                .push_before(&reservation, value)
                 .expect("push_before failed");
         }
     }
 
-    pub fn release(&mut self, reservation: NodeRef<Spot<T>>, release: Release) {
-        match release {
-            Release::All => {
-                let spot = self
-                    .list
-                    .remove(reservation)
-                    .expect("reservation not found");
+    pub fn release(&mut self, reservation: NodeRef<Spot<T>>, count: usize) -> bool {
+        let spot = self
+            .list
+            .get_mut(&reservation)
+            .expect("reservation not found");
 
-                let count = match spot {
-                    Spot::Reserved(count) => count,
-                    Spot::Value(_) => panic!("illegal: called release on value"),
-                };
-
-                self.len -= count;
-            }
-            Release::Count(count_to_remove) => {
-                let spot = self
-                    .list
-                    .get_mut(&reservation)
-                    .expect("reservation not found");
-
-                let count = match spot {
-                    Spot::Reserved(count) => count,
-                    Spot::Value(_) => panic!("illegal: called release on value"),
-                };
-
-                if count_to_remove > *count {
-                    panic!("count_to_remove {count_to_remove} > count {count}");
-                }
-
-                if *count == count_to_remove {
-                    self.list
-                        .remove(reservation)
-                        .expect("reservation not found");
-                } else {
-                    *count -= count_to_remove;
-                }
-            }
+        let cur_count = match spot {
+            Spot::Reserved(count) => count,
+            Spot::Value(_) => panic!("reservation already used"),
         };
-    }
-}
 
-/// Describes how many reserved spots to release.
-pub enum Release {
-    /// Uesd to release all reserved spots for the reference (e.g. in case of dropping an
-    /// iterator).
-    All,
-    /// Used to release a single reserved spot for the reference (e.g. for a single permit).
-    Count(usize),
+        if count > *cur_count {
+            panic!("count {count} > cur_count {cur_count}");
+        }
+
+        if *cur_count == count {
+            self.list
+                .remove(reservation)
+                .expect("reservation not found");
+        } else {
+            *cur_count -= count;
+        }
+
+        return true
+    }
 }
 
 /// A spot in the queue.
