@@ -38,6 +38,10 @@ impl<T> LinkedList<T> {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Pushes the value to the head of the list. The resulting [NodeRef] can be used to
     /// remove the entry or add items to either side of it.
     ///

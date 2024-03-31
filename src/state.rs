@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use crate::linked_list::{LinkedList, NodeRef};
-use crate::queue::{Queue, Spot};
-use crate::{Receiver, ReserveError, Sender, TryReserveError};
+use crate::queue::{Queue, Spot, Recv};
+use crate::{Receiver, RecvError, ReserveError, Sender, TryRecvError, TryReserveError};
 
 pub struct State<T> {
     inner: Arc<Mutex<InnerState<T>>>,
@@ -33,13 +33,9 @@ where
         }
     }
 
-    pub fn inner_mut(&self) -> impl DerefMut<Target = InnerState<T>> + '_ {
+    fn inner_mut(&self) -> impl DerefMut<Target = InnerState<T>> + '_ {
         self.inner.lock().unwrap()
     }
-
-    // fn next_waker_id(&self) -> wakerid {
-    //     self.inner_mut().next_waker_id()
-    // }
 
     pub fn new_sender(&self) -> Sender<T> {
         self.inner_mut().senders_count += 1;
@@ -50,14 +46,6 @@ where
         self.inner_mut().receivers_count += 1;
         Receiver::new(self.clone())
     }
-
-    // fn wake_all(wakers: option<impl iterator<item = waker>>) {
-    //     if let some(wakers) = wakers {
-    //         for waker in wakers {
-    //             waker.wake()
-    //         }
-    //     }
-    // }
 
     pub fn close_all_receivers(&self) {
         let (send_futures, recv_futures) = {
@@ -118,24 +106,39 @@ where
         &self,
         count: usize,
         cx: &mut Context<'_>,
-        send_future: &mut Option<NodeRef<SendWaker>>,
+        waker_ref: &mut Option<NodeRef<SendWaker>>,
     ) -> Poll<Result<NodeRef<Spot<T>>, ReserveError>> {
         let mut inner = self.inner_mut();
 
         match inner.try_reserve(count) {
             Ok(reservation) => {
-                if let Some(send_future) = send_future.take() {
+                if let Some(send_future) = waker_ref.take() {
                     inner.send_futures.remove(send_future);
                 }
 
                 Poll::Ready(Ok(reservation))
             }
             Err(TryReserveError::Full) => {
-                if send_future.is_none() {
-                    *send_future = Some(inner.send_futures.push_tail(SendWaker {
-                        count,
-                        waker: cx.waker().clone(),
-                    }));
+                let send_future = SendWaker {
+                    count,
+                    waker: cx.waker().clone(),
+                };
+
+                match waker_ref {
+                    None => {
+                        *waker_ref = Some(inner.send_futures.push_tail(send_future));
+                    }
+                    Some(waker_ref) => {
+                        // Satisfying the following requirement from std::future::Future::poll
+                        // docs:
+                        //
+                        //     Note that on multiple calls to poll, only the Waker from the Context
+                        //     passed to the most recent call should be scheduled to receive a
+                        //     wakeup.
+                        let send_future_mut =
+                            inner.send_futures.get_mut(waker_ref).expect("send_future");
+                        *send_future_mut = send_future;
+                    }
                 }
 
                 Poll::Pending
@@ -148,9 +151,7 @@ where
         let waker = {
             let mut inner = self.inner_mut();
             inner.queue.send(reservation, value);
-            inner.recv_futures.pop_head()
-            // TODO figure out if this is needed instead?
-            // inner.recv_futures.head().map(|waker| waker.clone())
+            inner.recv_futures.head().map(|waker| waker.clone())
         };
 
         if let Some(waker) = waker {
@@ -182,52 +183,106 @@ where
         }
     }
 
-    // fn drop_send_future(&self, fut: Option<NodeRef<SendWaker>>) {
-    //     let waker = {
-    //         let mut inner = self.inner_mut();
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        let mut inner = self.inner_mut();
+        inner.try_recv()
+    }
 
-    //         if let Some(fut) = fut {
-    //             inner.waiting_send_futures.remove(fut);
-    //             inner.reserved_count -= fut.count
-    //         }
+    pub fn recv(
+        &self,
+        cx: &mut Context<'_>,
+        waker_ref: &mut Option<NodeRef<Waker>>,
+    ) -> Poll<Result<T, RecvError>> {
+        self.recv_with_callback(cx, waker_ref, |value, _inner| value)
+    }
 
-    //         // If there's room for the next sender in the queue, wake it.
-    //         match inner.waiting_send_futures.head() {
-    //             Some(next) => inner.has_room_for(next.count).then(|| next.waker.clone()),
-    //             None => None,
-    //         }
-    //     };
+    fn recv_with_callback<F, R>(
+        &self,
+        cx: &mut Context<'_>,
+        waker_ref: &mut Option<NodeRef<Waker>>,
+        callback: F,
+    ) -> Poll<Result<R, RecvError>>
+    where
+        F: FnOnce(T, &mut InnerState<T>) -> R
+    {
+        let mut inner = self.inner_mut();
 
-    //     if let Some(waker) = waker {
-    //         waker.wake();
-    //     }
-    // }
+        match inner.try_recv() {
+            Ok(value) => {
+                if let Some(node_ref) = waker_ref.take() {
+                    inner.recv_futures.remove(node_ref);
+                }
 
-    // fn drop_recv_future(&self, id: &WakerId, has_received: bool) {
-    //     let waker = {
-    //         let mut inner = self.inner_mut();
-    //         let was_awoken = inner.waiting_recv_futures.remove(id).is_none();
+                let ret = callback(value, &mut inner);
 
-    //         // Wake another receiver in case this one has been awoken, but it was dropped before it
-    //         // managed to receive anything.
-    //         if was_awoken {
-    //             if has_received {
-    //                 // If we have received, it means a spot was freed in the internal buffer, so wake
-    //                 // one sender.
-    //                 inner.take_one_send_future_waker()
-    //             } else {
-    //                 // If we have not received, it means another RecvFuture might take over.
-    //                 inner.take_one_recv_future_waker()
-    //             }
-    //         } else {
-    //             None
-    //         }
-    //     };
+                Poll::Ready(Ok(ret))
+            },
+            Err(TryRecvError::Disconnected) => Poll::Ready(Err(RecvError)),
+            Err(TryRecvError::Empty) => {
+                let waker = cx.waker().clone();
+                match waker_ref {
+                    None => {
+                        *waker_ref = Some(inner.recv_futures.push_tail(waker));
+                    },
+                    Some(waker_ref) => {
+                        // Satisfying the following requirement from std::future::Future::poll
+                        // docs:
+                        //
+                        //     Note that on multiple calls to poll, only the Waker from the Context
+                        //     passed to the most recent call should be scheduled to receive a
+                        //     wakeup.
+                        let waker_ref_mut = inner.recv_futures.get_mut(waker_ref).expect("recv_future");
+                        *waker_ref_mut = waker;
+                    },
+                }
 
-    //     if let Some(waker) = waker {
-    //         waker.wake();
-    //     }
-    // }
+                Poll::Pending
+            }
+        }
+    }
+
+    pub fn try_recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, TryRecvError> {
+        let mut inner = self.inner_mut();
+        inner.try_recv_many(vec, count)
+    }
+
+    pub fn recv_many(
+        &self,
+        cx: &mut Context<'_>,
+        waker_ref: &mut Option<NodeRef<Waker>>,
+        vec: &mut Vec<T>,
+        count: usize,
+    ) -> Poll<Result<usize, RecvError>> {
+        self.recv_with_callback(cx, waker_ref, |value, inner| {
+            vec.push(value);
+            inner.fill_rest(vec, count)
+        })
+    }
+
+    pub fn drop_recv_future(&self, waker_ref: &mut Option<NodeRef<Waker>>) {
+        let waker = {
+            let mut inner = self.inner_mut();
+
+            if let Some(node_ref) = waker_ref.take() {
+                inner.recv_futures.remove(node_ref);
+            }
+
+            let has_received = waker_ref.is_none();
+
+            if has_received {
+                // If we have received, it means a spot was freed in the internal buffer, so wake
+                // one sender.
+                inner.next_send_future_waker()
+            } else {
+                // If we have not received, it means another RecvFuture might take over.
+                inner.next_recv_future_waker()
+            }
+        };
+
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -254,22 +309,8 @@ impl SendWaker {
     }
 }
 
-// TODO we need acustom impl of a LinkedList to be able to add/remove wakers, instead of using
-// WakerId.
-//
-// Moreover, currently reservations are just a counter, they don't actually take the
-// spot in the buffer, so in the case of a single consumer the result will be
-// re-ordered. We could keep an enum like this:
-//
-// ```
-// enum Spot<T> {
-//   Value(T),
-//   Reserved,
-// }
-// ```
-//
-// in the buffer so that we know we need to wait for the reservations.
 struct InnerState<T> {
+    /// Contains ordered values and pending entries.
     queue: Queue<T>,
     /// Total of created receivers.
     receivers_count: usize,
@@ -306,16 +347,41 @@ where
         }
     }
 
-    // #[must_use]
-    // fn send_and_get_receiver_waker(
-    //     &mut self,
-    //     value: T,
-    //     waker: NodeRef<SendWaker>,
-    // ) -> Option<&Waker> {
-    //     self.buffer.push_back(value);
-    //     self.send_futures.remove(waker);
-    //     self.recv_futures.head()
-    // }
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        match self.queue.try_recv() {
+            Recv::Value(value) => Ok(value),
+            Recv::Pending => Err(TryRecvError::Empty),
+            Recv::Empty => {
+                if self.disconnected {
+                    Err(TryRecvError::Disconnected)
+                } else {
+                    Err(TryRecvError::Empty)
+                }
+            },
+        }
+    }
+
+    pub fn try_recv_many(&mut self, vec: &mut Vec<T>, count: usize) -> Result<usize, TryRecvError> {
+        let value = self.try_recv()?;
+        vec.push(value);
+        Ok(self.fill_rest(vec, count))
+    }
+
+    pub fn fill_rest(&mut self, vec: &mut Vec<T>, count: usize) -> usize {
+        let mut total = 1;
+
+        for _ in 1..count {
+            match self.queue.try_recv() {
+                Recv::Value(value) => {
+                    vec.push(value);
+                    total += 1;
+                },
+                Recv::Pending | Recv::Empty => break,
+            }
+        }
+
+        total
+    }
 
     fn mark_disconnected_and_take_send_futures(&mut self) -> LinkedList<SendWaker> {
         self.disconnected = true;
@@ -327,30 +393,27 @@ where
         std::mem::take(&mut self.recv_futures)
     }
 
-    // #[must_use]
-    // fn take_one_send_future_waker(&mut self) -> Option<Waker> {
-    //     if self.has_room_for(1) {
-    //         Self::take_one_waker(&mut self.send_futures)
-    //     } else {
-    //         None
-    //     }
-    // }
+    #[must_use]
+    fn next_send_future_waker(&self) -> Option<Waker> {
+        let send_future = self.send_futures.head()?;
 
-    // #[must_use]
-    // fn take_one_recv_future_waker(&mut self) -> Option<Waker> {
-    //     if !self.buffer.is_empty() {
-    //         Self::take_one_waker(&mut self.recv_futures)
-    //     } else {
-    //         None
-    //     }
-    // }
+        if self.queue.has_room_for(send_future.count) {
+            // NOTE: Not calling pop_head() because calling wake() does not guarantee that the
+            // future will be chosen (e.g. in a tokio::select!)
+            Some(send_future.waker.clone())
+        } else {
+            None
+        }
+    }
 
-    // #[must_use]
-    // fn take_one_waker(map: &mut BTreeMap<WakerId, Waker>) -> Option<Waker> {
-    //     map.pop_first().map(|(_, waker)| waker)
-    // }
-
-    // fn take_all_wakers(map: &mut BTreeMap<WakerId, Waker>) -> BTreeMap<WakerId, Waker> {
-    //     std::mem::take(map)
-    // }
+    #[must_use]
+    fn next_recv_future_waker(&mut self) -> Option<Waker> {
+        if !self.queue.can_recv() {
+            // NOTE: Not calling pop_head() because calling wake() does not guarantee that the future will be
+            // chosen (e.g. in a tokio::select!)
+            self.recv_futures.head().map(|waker| waker.clone())
+        } else {
+            None
+        }
+    }
 }

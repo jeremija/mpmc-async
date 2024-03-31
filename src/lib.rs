@@ -85,7 +85,7 @@ use self::state::SendWaker;
 use std::fmt::Display;
 use std::ops::DerefMut;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use std::future::Future;
 
@@ -236,57 +236,27 @@ where
         self.state.close_all_receivers();
     }
 
-//    /// Waits until there's a message to be read and returns. Returns an error when there are no
-//    /// more messages in the queue and all [Sender]s have been dropped.
-//    pub async fn recv(&self) -> Result<T, RecvError> {
-//        let recv = RecvFuture::new(self);
+    /// Waits until there's a message to be read and returns. Returns an error when there are no
+    /// more messages in the queue and all [Sender]s have been dropped.
+    pub async fn recv(&self) -> Result<T, RecvError> {
+        let recv = RecvFuture::new(self);
+        recv.await
+    }
 
-//        recv.await
-//    }
+    /// Checks if there's a message to be read and returns immediately. Returns an error when the
+    /// channel is disconnected or empty.
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.state.try_recv()
+    }
 
-//    /// Checks if there's a message to be read and returns immediately. Returns an error when the
-//    /// channel is disconnected or empty.
-//    pub fn try_recv(&self) -> Result<T, TryRecvError> {
-//        let mut state = self.state.inner_mut();
+   pub async fn recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, RecvError> {
+       let recv = RecvManyFuture::new(self, vec, count);
+       recv.await
+   }
 
-//        if let Some(value) = state.buffer.pop_front() {
-//            Ok(value)
-//        } else if state.disconnected && state.reserved_count == 0 {
-//            Err(TryRecvError::Disconnected)
-//        } else {
-//            Err(TryRecvError::Empty)
-//        }
-//    }
-
-//    pub async fn recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, RecvError> {
-//        let recv = RecvManyFuture::new(self.state.next_waker_id(), self, vec, count);
-//        recv.await
-//    }
-
-//    pub fn try_recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, TryRecvError> {
-//        let mut state = self.state.inner_mut();
-
-//        if let Some(value) = state.buffer.pop_front() {
-//            let mut num_received = 1;
-//            vec.push(value);
-
-//            for _ in 1..count {
-//                match state.buffer.pop_front() {
-//                    Some(value) => {
-//                        vec.push(value);
-//                        num_received += 1;
-//                    }
-//                    None => break,
-//                }
-//            }
-
-//            Ok(num_received)
-//        } else if state.disconnected && state.reserved_count == 0 {
-//            Err(TryRecvError::Disconnected)
-//        } else {
-//            Err(TryRecvError::Empty)
-//        }
-//    }
+   pub fn try_recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, TryRecvError> {
+       self.state.try_recv_many(vec, count)
+   }
 }
 
 /// The last reciever that's dropped will mark the channel as disconnected.
@@ -581,158 +551,99 @@ where
     }
 }
 
-//struct RecvFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    receiver: &'a Receiver<T>,
-//    waker_ref: NodeRef<Waker>,
-//    has_received: bool,
-//}
+struct RecvFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    receiver: &'a Receiver<T>,
+    waker_ref: Option<NodeRef<Waker>>,
+}
 
-//impl<'a, T> RecvFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn new(receiver: &'a Receiver<T>) -> Self {
-//        Self {
-//            receiver,
-//            has_received: false,
-//        }
-//    }
-//}
+impl<'a, T> RecvFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn new(receiver: &'a Receiver<T>) -> Self {
+        Self {
+            receiver,
+            waker_ref: None,
+        }
+    }
+}
 
-//impl<'a, T> Unpin for RecvFuture<'a, T> where T: Send + Sync + 'static {}
+impl<'a, T> Unpin for RecvFuture<'a, T> where T: Send + Sync + 'static {}
 
-//impl<'a, T> Future for RecvFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    type Output = Result<T, RecvError>;
+impl<'a, T> Future for RecvFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    type Output = Result<T, RecvError>;
 
-//    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-//        let this = self.deref_mut();
-//        let mut state = this.receiver.state.inner_mut();
-//        let value = state.buffer.pop_front();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.deref_mut();
+        this.receiver.state.recv(cx, &mut self.waker_ref)
+    }
+}
 
-//        match value {
-//            Some(value) => {
-//                this.has_received = true;
-//                Poll::Ready(Ok(value))
-//            }
-//            None => {
-//                if state.disconnected && state.reserved_count == 0 {
-//                    Poll::Ready(Err(RecvError))
-//                } else {
-//                    state.waiting_recv_futures.push(cx.waker().clone());
-//                    if let Some(waker) = state.take_one_send_future_waker() {
-//                        drop(state);
-//                        waker.wake();
-//                    }
-//                    Poll::Pending
-//                }
-//            }
-//        }
-//    }
-//}
+impl<'a, T> Drop for RecvFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.receiver
+            .state
+            .drop_recv_future(&mut self.waker_ref);
+    }
+}
 
-//impl<'a, T> Drop for RecvFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn drop(&mut self) {
-//        self.receiver
-//            .state
-//            .drop_recv_future(&self.id, self.has_received);
-//    }
-//}
+struct RecvManyFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    receiver: &'a Receiver<T>,
+    vec: &'a mut Vec<T>,
+    count: usize,
+    waker_ref: Option<NodeRef<Waker>>,
+}
 
-//struct RecvManyFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    id: WakerId,
-//    receiver: &'a Receiver<T>,
-//    vec: &'a mut Vec<T>,
-//    count: usize,
-//    has_received: bool,
-//}
+impl<'a, T> RecvManyFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn new(receiver: &'a Receiver<T>, vec: &'a mut Vec<T>, count: usize) -> Self {
+        Self {
+            receiver,
+            vec,
+            count,
+            waker_ref: None,
+        }
+    }
+}
 
-//impl<'a, T> RecvManyFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn new(id: WakerId, receiver: &'a Receiver<T>, vec: &'a mut Vec<T>, count: usize) -> Self {
-//        Self {
-//            id,
-//            receiver,
-//            vec,
-//            count,
-//            has_received: false,
-//        }
-//    }
-//}
+impl<'a, T> Unpin for RecvManyFuture<'a, T> where T: Send + Sync + 'static {}
 
-//impl<'a, T> Unpin for RecvManyFuture<'a, T> where T: Send + Sync + 'static {}
+impl<'a, T> Future for RecvManyFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    type Output = Result<usize, RecvError>;
 
-//impl<'a, T> Future for RecvManyFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    type Output = Result<usize, RecvError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.deref_mut();
+        this.receiver.state.recv_many(cx, &mut this.waker_ref, &mut this.vec, this.count)
+    }
+}
 
-//    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-//        let this = self.deref_mut();
-//        let mut state = this.receiver.state.inner_mut();
-
-//        let value = state.buffer.pop_front();
-
-//        match value {
-//            Some(value) => {
-//                let mut num_received = 1;
-//                this.vec.push(value);
-
-//                for _ in 1..this.count {
-//                    match state.buffer.pop_front() {
-//                        Some(value) => {
-//                            this.vec.push(value);
-//                            num_received += 1;
-//                        }
-//                        None => break,
-//                    }
-//                }
-
-//                this.has_received = true;
-//                Poll::Ready(Ok(num_received))
-//            }
-//            None => {
-//                if state.disconnected && state.reserved_count == 0 {
-//                    Poll::Ready(Err(RecvError))
-//                } else {
-//                    state
-//                        .waiting_recv_futures
-//                        .insert(this.id, cx.waker().clone());
-//                    if let Some(waker) = state.take_one_send_future_waker() {
-//                        drop(state);
-//                        waker.wake();
-//                    }
-//                    Poll::Pending
-//                }
-//            }
-//        }
-//    }
-//}
-
-//impl<'a, T> Drop for RecvManyFuture<'a, T>
-//where
-//    T: Send + Sync + 'static,
-//{
-//    fn drop(&mut self) {
-//        self.receiver
-//            .state
-//            .drop_recv_future(&self.id, self.has_received);
-//    }
-//}
+impl<'a, T> Drop for RecvManyFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.receiver
+            .state
+            .drop_recv_future(&mut self.waker_ref);
+    }
+}
 
 //#[cfg(test)]
 //mod testing {

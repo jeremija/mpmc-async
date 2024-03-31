@@ -41,6 +41,13 @@ impl<T> Queue<T> {
         self.len + count <= self.cap
     }
 
+    pub fn can_recv(&self) -> bool {
+        match self.list.head() {
+            Some(Spot::Value(_)) => true,
+            Some(Spot::Reserved(_)) | None => false,
+        }
+    }
+
     /// Attempts to reserve a number of spots in the queue if there is room.
     pub fn try_reserve(&mut self, count: usize) -> Option<NodeRef<Spot<T>>> {
         if !self.has_room_for(count) {
@@ -53,16 +60,18 @@ impl<T> Queue<T> {
     }
 
     /// Reads the next ready value, if any.
-    pub fn get_next(&mut self) -> Option<T> {
-        let Spot::Value(_) = self.list.head()? else {
-            return None;
-        };
+    pub fn try_recv(&mut self) -> Recv<T> {
+        match self.list.head() {
+            Some(Spot::Value(_)) => {
+                let spot = self.list.pop_head().expect("value");
 
-        let spot = self.list.pop_head().expect("no value to pop: just checked");
-
-        match spot {
-            Spot::Value(value) => Some(value),
-            Spot::Reserved(_) => unreachable!(),
+                match spot {
+                    Spot::Value(value) => Recv::Value(value),
+                    Spot::Reserved(_) => unreachable!(),
+                }
+            },
+            Some(Spot::Reserved(_)) => Recv::Pending,
+            None => Recv::Empty,
         }
     }
 
@@ -120,6 +129,15 @@ impl<T> Queue<T> {
 
         return true
     }
+}
+
+pub enum Recv<T> {
+    /// Value read.
+    Value(T),
+    /// Value is pending.
+    Pending,
+    /// Queue is empty.
+    Empty,
 }
 
 /// A spot in the queue.
