@@ -119,10 +119,7 @@ where
                 Poll::Ready(Ok(reservation))
             }
             Err(TryReserveError::Full) => {
-                let send_future = SendWaker {
-                    count,
-                    waker: cx.waker().clone(),
-                };
+                let send_future = SendWaker::new(count, cx.waker().clone());
 
                 match waker_ref {
                     None => {
@@ -296,16 +293,8 @@ impl SendWaker {
         Self { count, waker }
     }
 
-    pub fn count(&self) -> usize {
-        self.count
-    }
-
     pub fn wake(self) {
         self.waker.wake()
-    }
-
-    pub fn wake_by_ref(&self) {
-        self.waker.wake_by_ref();
     }
 }
 

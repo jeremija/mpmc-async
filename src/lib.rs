@@ -75,9 +75,9 @@ use self::state::State;
 ///!     assert_eq!(exp, got);
 ///! });
 ///! ```
-pub mod linked_list;
-pub mod queue;
-pub mod state;
+mod linked_list;
+mod queue;
+mod state;
 
 use self::linked_list::NodeRef;
 use self::state::SendWaker;
@@ -249,14 +249,14 @@ where
         self.state.try_recv()
     }
 
-   pub async fn recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, RecvError> {
-       let recv = RecvManyFuture::new(self, vec, count);
-       recv.await
-   }
+    pub async fn recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, RecvError> {
+        let recv = RecvManyFuture::new(self, vec, count);
+        recv.await
+    }
 
-   pub fn try_recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, TryRecvError> {
-       self.state.try_recv_many(vec, count)
-   }
+    pub fn try_recv_many(&self, vec: &mut Vec<T>, count: usize) -> Result<usize, TryRecvError> {
+        self.state.try_recv_many(vec, count)
+    }
 }
 
 /// The last reciever that's dropped will mark the channel as disconnected.
@@ -590,9 +590,7 @@ where
     T: Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        self.receiver
-            .state
-            .drop_recv_future(&mut self.waker_ref);
+        self.receiver.state.drop_recv_future(&mut self.waker_ref);
     }
 }
 
@@ -630,7 +628,9 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.deref_mut();
-        this.receiver.state.recv_many(cx, &mut this.waker_ref, &mut this.vec, this.count)
+        this.receiver
+            .state
+            .recv_many(cx, &mut this.waker_ref, &mut this.vec, this.count)
     }
 }
 
@@ -639,371 +639,369 @@ where
     T: Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        self.receiver
-            .state
-            .drop_recv_future(&mut self.waker_ref);
+        self.receiver.state.drop_recv_future(&mut self.waker_ref);
     }
 }
 
-//#[cfg(test)]
-//mod testing {
-//    use std::collections::BTreeSet;
-//    use std::time::Duration;
+#[cfg(test)]
+mod testing {
+    use std::collections::BTreeSet;
+    // use std::time::Duration;
 
-//    use super::*;
+    use super::*;
 
-//    #[tokio::test]
-//    async fn send_receive() {
-//        let (tx, rx) = channel(1);
-//        tx.send(1).await.expect("no error");
-//        let res = rx.recv().await.expect("no error");
-//        assert_eq!(res, 1);
-//    }
+    #[tokio::test]
+    async fn send_receive() {
+        let (tx, rx) = channel(1);
+        tx.send(1).await.expect("no error");
+        let res = rx.recv().await.expect("no error");
+        assert_eq!(res, 1);
+    }
 
-//    #[tokio::test]
-//    async fn mpsc() {
-//        let (tx, rx) = channel(1);
+   #[tokio::test]
+   async fn mpsc() {
+       let (tx, rx) = channel(1);
 
-//        let num_workers = 10;
-//        let count = 10;
-//        let mut tasks = Vec::with_capacity(num_workers);
+       let num_workers = 10;
+       let count = 10;
+       let mut tasks = Vec::with_capacity(num_workers);
 
-//        for i in 0..num_workers {
-//            let tx = tx.clone();
-//            let task = tokio::spawn(async move {
-//                for j in 0..count {
-//                    let val = i * count + j;
-//                    tx.send(val).await.expect("Failed to send");
-//                }
-//            });
-//            tasks.push(task);
-//        }
+       for i in 0..num_workers {
+           let tx = tx.clone();
+           let task = tokio::spawn(async move {
+               for j in 0..count {
+                   let val = i * count + j;
+                   tx.send(val).await.expect("Failed to send");
+               }
+           });
+           tasks.push(task);
+       }
 
-//        let total = count * num_workers;
-//        let mut values = BTreeSet::new();
+       let total = count * num_workers;
+       let mut values = BTreeSet::new();
 
-//        for _ in 0..total {
-//            let value = rx.recv().await.expect("no error");
-//            values.insert(value);
-//        }
+       for _ in 0..total {
+           let value = rx.recv().await.expect("no error");
+           values.insert(value);
+       }
 
-//        let exp = (0..total).collect::<Vec<_>>();
-//        let got = values.into_iter().collect::<Vec<_>>();
-//        assert_eq!(exp, got);
+       let exp = (0..total).collect::<Vec<_>>();
+       let got = values.into_iter().collect::<Vec<_>>();
+       assert_eq!(exp, got);
 
-//        for task in tasks {
-//            task.await.expect("failed to join task");
-//        }
-//    }
+       for task in tasks {
+           task.await.expect("failed to join task");
+       }
+   }
 
-//    async fn run_tasks<F, Fut>(send: F)
-//    where
-//        Fut: Future<Output = Sender<usize>> + Send,
-//        F: Send + Sync + 'static + Copy,
-//        F: Fn(Sender<usize>, usize) -> Fut,
-//    {
-//        let (tx, rx) = channel(1);
+    //    async fn run_tasks<F, Fut>(send: F)
+    //    where
+    //        Fut: Future<Output = Sender<usize>> + Send,
+    //        F: Send + Sync + 'static + Copy,
+    //        F: Fn(Sender<usize>, usize) -> Fut,
+    //    {
+    //        let (tx, rx) = channel(1);
 
-//        let num_workers = 10;
-//        let count = 10;
-//        let mut tasks = Vec::with_capacity(num_workers);
+    //        let num_workers = 10;
+    //        let count = 10;
+    //        let mut tasks = Vec::with_capacity(num_workers);
 
-//        for i in 0..num_workers {
-//            let mut tx = tx.clone();
-//            let task = tokio::spawn(async move {
-//                for j in 0..count {
-//                    let val = i * count + j;
-//                    tx = send(tx, val).await;
-//                }
-//            });
-//            tasks.push(task);
-//        }
+    //        for i in 0..num_workers {
+    //            let mut tx = tx.clone();
+    //            let task = tokio::spawn(async move {
+    //                for j in 0..count {
+    //                    let val = i * count + j;
+    //                    tx = send(tx, val).await;
+    //                }
+    //            });
+    //            tasks.push(task);
+    //        }
 
-//        let total = count * num_workers;
-//        let values = Arc::new(Mutex::new(BTreeSet::new()));
+    //        let total = count * num_workers;
+    //        let values = Arc::new(Mutex::new(BTreeSet::new()));
 
-//        for _ in 0..num_workers {
-//            let values = values.clone();
-//            let rx = rx.clone();
-//            let task = tokio::spawn(async move {
-//                for _ in 0..count {
-//                    let val = rx.recv().await.expect("Failed to recv");
-//                    values.lock().unwrap().insert(val);
-//                }
-//            });
-//            tasks.push(task);
-//        }
+    //        for _ in 0..num_workers {
+    //            let values = values.clone();
+    //            let rx = rx.clone();
+    //            let task = tokio::spawn(async move {
+    //                for _ in 0..count {
+    //                    let val = rx.recv().await.expect("Failed to recv");
+    //                    values.lock().unwrap().insert(val);
+    //                }
+    //            });
+    //            tasks.push(task);
+    //        }
 
-//        for task in tasks {
-//            task.await.expect("failed to join task");
-//        }
+    //        for task in tasks {
+    //            task.await.expect("failed to join task");
+    //        }
 
-//        let exp = (0..total).collect::<Vec<_>>();
-//        let got = std::mem::take(values.lock().unwrap().deref_mut())
-//            .into_iter()
-//            .collect::<Vec<_>>();
-//        assert_eq!(exp, got);
-//    }
+    //        let exp = (0..total).collect::<Vec<_>>();
+    //        let got = std::mem::take(values.lock().unwrap().deref_mut())
+    //            .into_iter()
+    //            .collect::<Vec<_>>();
+    //        assert_eq!(exp, got);
+    //    }
 
-//    #[tokio::test]
-//    async fn mpmc_multiple_tasks() {
-//        run_tasks(|tx, value| async move {
-//            tx.send(value).await.expect("Failed to send");
-//            tx
-//        })
-//        .await;
-//    }
+    //    #[tokio::test]
+    //    async fn mpmc_multiple_tasks() {
+    //        run_tasks(|tx, value| async move {
+    //            tx.send(value).await.expect("Failed to send");
+    //            tx
+    //        })
+    //        .await;
+    //    }
 
-//    #[tokio::test]
-//    async fn mpmc_reserve() {
-//        run_tasks(|tx, value| async move {
-//            tx.reserve().await.expect("Failed to send").send(value);
-//            tx
-//        })
-//        .await;
-//    }
+    //    #[tokio::test]
+    //    async fn mpmc_reserve() {
+    //        run_tasks(|tx, value| async move {
+    //            tx.reserve().await.expect("Failed to send").send(value);
+    //            tx
+    //        })
+    //        .await;
+    //    }
 
-//    #[tokio::test]
-//    async fn mpmc_try_reserve() {
-//        run_tasks(|tx, value| async move {
-//            loop {
-//                match tx.try_reserve() {
-//                    Ok(permit) => {
-//                        permit.send(value);
-//                    }
-//                    Err(_err) => {
-//                        tokio::time::sleep(Duration::ZERO).await;
-//                        continue;
-//                    }
-//                };
+    //    #[tokio::test]
+    //    async fn mpmc_try_reserve() {
+    //        run_tasks(|tx, value| async move {
+    //            loop {
+    //                match tx.try_reserve() {
+    //                    Ok(permit) => {
+    //                        permit.send(value);
+    //                    }
+    //                    Err(_err) => {
+    //                        tokio::time::sleep(Duration::ZERO).await;
+    //                        continue;
+    //                    }
+    //                };
 
-//                return tx;
-//            }
-//        })
-//        .await;
-//    }
+    //                return tx;
+    //            }
+    //        })
+    //        .await;
+    //    }
 
-//    #[tokio::test]
-//    async fn send_errors() {
-//        let (tx, rx) = channel::<i32>(2);
-//        assert_eq!(tx.send(1).await, Ok(()));
-//        assert_eq!(tx.send(2).await, Ok(()));
-//        let task = tokio::spawn({
-//            let tx = tx.clone();
-//            async move { tx.send(3).await }
-//        });
-//        drop(rx);
-//        assert_eq!(tx.send(4).await, Err(SendError(4)));
-//        assert_eq!(task.await.expect("panic"), Err(SendError(3)));
-//    }
+    //    #[tokio::test]
+    //    async fn send_errors() {
+    //        let (tx, rx) = channel::<i32>(2);
+    //        assert_eq!(tx.send(1).await, Ok(()));
+    //        assert_eq!(tx.send(2).await, Ok(()));
+    //        let task = tokio::spawn({
+    //            let tx = tx.clone();
+    //            async move { tx.send(3).await }
+    //        });
+    //        drop(rx);
+    //        assert_eq!(tx.send(4).await, Err(SendError(4)));
+    //        assert_eq!(task.await.expect("panic"), Err(SendError(3)));
+    //    }
 
-//    #[test]
-//    fn try_send_errors() {
-//        let (tx, rx) = channel::<i32>(2);
-//        assert_eq!(tx.try_send(1), Ok(()));
-//        assert_eq!(tx.try_send(2), Ok(()));
-//        assert_eq!(tx.try_send(3), Err(TrySendError::Full(3)));
-//        assert_eq!(tx.try_send(4), Err(TrySendError::Full(4)));
-//        drop(rx);
-//        assert_eq!(tx.try_send(5), Err(TrySendError::Disconnected(5)));
-//    }
+    //    #[test]
+    //    fn try_send_errors() {
+    //        let (tx, rx) = channel::<i32>(2);
+    //        assert_eq!(tx.try_send(1), Ok(()));
+    //        assert_eq!(tx.try_send(2), Ok(()));
+    //        assert_eq!(tx.try_send(3), Err(TrySendError::Full(3)));
+    //        assert_eq!(tx.try_send(4), Err(TrySendError::Full(4)));
+    //        drop(rx);
+    //        assert_eq!(tx.try_send(5), Err(TrySendError::Disconnected(5)));
+    //    }
 
-//    #[tokio::test]
-//    async fn reserve_errors() {
-//        let (tx, rx) = channel::<i32>(2);
-//        tx.reserve().await.expect("reserved 1");
-//        tx.reserve().await.expect("reserved 2");
-//        let task = tokio::spawn({
-//            let tx = tx.clone();
-//            async move {
-//                assert!(matches!(tx.reserve().await, Err(ReserveError)));
-//            }
-//        });
-//        drop(rx);
-//        assert!(matches!(tx.reserve().await, Err(ReserveError)));
-//        task.await.expect("no panic");
-//    }
+    //    #[tokio::test]
+    //    async fn reserve_errors() {
+    //        let (tx, rx) = channel::<i32>(2);
+    //        tx.reserve().await.expect("reserved 1");
+    //        tx.reserve().await.expect("reserved 2");
+    //        let task = tokio::spawn({
+    //            let tx = tx.clone();
+    //            async move {
+    //                assert!(matches!(tx.reserve().await, Err(ReserveError)));
+    //            }
+    //        });
+    //        drop(rx);
+    //        assert!(matches!(tx.reserve().await, Err(ReserveError)));
+    //        task.await.expect("no panic");
+    //    }
 
-//    #[test]
-//    fn try_reserve_errors() {
-//        let (tx, rx) = channel::<i32>(2);
-//        let _res1 = tx.try_reserve().expect("reserved 1");
-//        let _res2 = tx.try_reserve().expect("reserved 2");
-//        assert!(matches!(tx.try_reserve(), Err(TryReserveError::Full)));
-//        assert!(matches!(tx.try_reserve(), Err(TryReserveError::Full)));
-//        drop(rx);
-//        assert!(matches!(
-//            tx.try_reserve(),
-//            Err(TryReserveError::Disconnected)
-//        ));
-//    }
+    //    #[test]
+    //    fn try_reserve_errors() {
+    //        let (tx, rx) = channel::<i32>(2);
+    //        let _res1 = tx.try_reserve().expect("reserved 1");
+    //        let _res2 = tx.try_reserve().expect("reserved 2");
+    //        assert!(matches!(tx.try_reserve(), Err(TryReserveError::Full)));
+    //        assert!(matches!(tx.try_reserve(), Err(TryReserveError::Full)));
+    //        drop(rx);
+    //        assert!(matches!(
+    //            tx.try_reserve(),
+    //            Err(TryReserveError::Disconnected)
+    //        ));
+    //    }
 
-//    #[tokio::test]
-//    async fn recv_future_awoken_but_unused() {
-//        let (tx, rx) = channel::<i32>(1);
-//        let mut recv = Box::pin(rx.recv());
-//        let rx2 = rx.clone();
-//        // Try receiving from rx2, but don't drop it yet.
-//        tokio::select! {
-//            biased;
-//            _ = &mut recv => {
-//                panic!("unexpected recv");
-//            }
-//            _ = ReadyFuture {} => {}
-//        }
-//        let task = tokio::spawn(async move { rx2.recv().await });
-//        // Yield the current task so task above can be started.
-//        tokio::time::sleep(Duration::ZERO).await;
-//        tx.try_send(1).expect("sent");
-//        // It would hang without the drop, since the recv would be awoken, but we'd never await for
-//        // it. This is the main flaw of this design where only a single future is awoken at the
-//        // time. Alternatively, we could wake all of them at once, but this would most likely
-//        // result in performance degradation due to lock contention.
-//        drop(recv);
-//        let res = task.await.expect("no panic").expect("receivd");
-//        assert_eq!(res, 1);
-//    }
+    //    #[tokio::test]
+    //    async fn recv_future_awoken_but_unused() {
+    //        let (tx, rx) = channel::<i32>(1);
+    //        let mut recv = Box::pin(rx.recv());
+    //        let rx2 = rx.clone();
+    //        // Try receiving from rx2, but don't drop it yet.
+    //        tokio::select! {
+    //            biased;
+    //            _ = &mut recv => {
+    //                panic!("unexpected recv");
+    //            }
+    //            _ = ReadyFuture {} => {}
+    //        }
+    //        let task = tokio::spawn(async move { rx2.recv().await });
+    //        // Yield the current task so task above can be started.
+    //        tokio::time::sleep(Duration::ZERO).await;
+    //        tx.try_send(1).expect("sent");
+    //        // It would hang without the drop, since the recv would be awoken, but we'd never await for
+    //        // it. This is the main flaw of this design where only a single future is awoken at the
+    //        // time. Alternatively, we could wake all of them at once, but this would most likely
+    //        // result in performance degradation due to lock contention.
+    //        drop(recv);
+    //        let res = task.await.expect("no panic").expect("receivd");
+    //        assert_eq!(res, 1);
+    //    }
 
-//    #[tokio::test]
-//    async fn try_reserve_unused_permit_and_send() {
-//        let (tx, rx) = channel::<i32>(1);
-//        let permit = tx.try_reserve().expect("reserved");
-//        let task = tokio::spawn({
-//            let tx = tx.clone();
-//            async move { tx.send(1).await }
-//        });
-//        drop(permit);
-//        task.await.expect("no panic").expect("sent");
-//        assert_eq!(rx.try_recv().expect("recv"), 1);
-//    }
+    //    #[tokio::test]
+    //    async fn try_reserve_unused_permit_and_send() {
+    //        let (tx, rx) = channel::<i32>(1);
+    //        let permit = tx.try_reserve().expect("reserved");
+    //        let task = tokio::spawn({
+    //            let tx = tx.clone();
+    //            async move { tx.send(1).await }
+    //        });
+    //        drop(permit);
+    //        task.await.expect("no panic").expect("sent");
+    //        assert_eq!(rx.try_recv().expect("recv"), 1);
+    //    }
 
-//    #[tokio::test]
-//    async fn try_reserve_unused_permit_and_other_permit() {
-//        let (tx, rx) = channel::<i32>(1);
-//        let permit = tx.try_reserve().expect("reserved");
-//        let task = tokio::spawn({
-//            let tx = tx.clone();
-//            async move { tx.reserve().await.expect("reserved").send(1) }
-//        });
-//        drop(permit);
-//        task.await.expect("no panic");
-//        assert_eq!(rx.try_recv().expect("recv"), 1);
-//    }
+    //    #[tokio::test]
+    //    async fn try_reserve_unused_permit_and_other_permit() {
+    //        let (tx, rx) = channel::<i32>(1);
+    //        let permit = tx.try_reserve().expect("reserved");
+    //        let task = tokio::spawn({
+    //            let tx = tx.clone();
+    //            async move { tx.reserve().await.expect("reserved").send(1) }
+    //        });
+    //        drop(permit);
+    //        task.await.expect("no panic");
+    //        assert_eq!(rx.try_recv().expect("recv"), 1);
+    //    }
 
-//    #[tokio::test]
-//    async fn receiver_close_all() {
-//        let (tx, rx1) = channel::<i32>(3);
-//        let rx2 = rx1.clone();
-//        let permit1 = tx.reserve().await.unwrap();
-//        let permit2 = tx.reserve().await.unwrap();
-//        tx.send(1).await.unwrap();
-//        rx1.close_all();
-//        assert_eq!(rx1.recv().await.unwrap(), 1);
-//        assert_no_recv(&rx1).await;
-//        assert_no_recv(&rx2).await;
-//        permit1.send(2);
-//        permit2.send(3);
-//        assert_eq!(rx1.recv().await.unwrap(), 2);
-//        assert_eq!(rx2.try_recv().unwrap(), 3);
-//        assert_eq!(rx1.recv().await, Err(RecvError));
-//        assert_eq!(rx2.recv().await, Err(RecvError));
-//        assert!(matches!(tx.send(3).await, Err(SendError(3))));
-//    }
+    //    #[tokio::test]
+    //    async fn receiver_close_all() {
+    //        let (tx, rx1) = channel::<i32>(3);
+    //        let rx2 = rx1.clone();
+    //        let permit1 = tx.reserve().await.unwrap();
+    //        let permit2 = tx.reserve().await.unwrap();
+    //        tx.send(1).await.unwrap();
+    //        rx1.close_all();
+    //        assert_eq!(rx1.recv().await.unwrap(), 1);
+    //        assert_no_recv(&rx1).await;
+    //        assert_no_recv(&rx2).await;
+    //        permit1.send(2);
+    //        permit2.send(3);
+    //        assert_eq!(rx1.recv().await.unwrap(), 2);
+    //        assert_eq!(rx2.try_recv().unwrap(), 3);
+    //        assert_eq!(rx1.recv().await, Err(RecvError));
+    //        assert_eq!(rx2.recv().await, Err(RecvError));
+    //        assert!(matches!(tx.send(3).await, Err(SendError(3))));
+    //    }
 
-//    #[tokio::test]
-//    async fn receiver_close_all_permit_drop() {
-//        let (tx, rx) = channel::<i32>(3);
-//        let permit = tx.reserve().await.unwrap();
-//        rx.close_all();
-//        assert_no_recv(&rx).await;
-//        drop(permit);
-//        assert_eq!(rx.recv().await, Err(RecvError));
-//    }
+    //    #[tokio::test]
+    //    async fn receiver_close_all_permit_drop() {
+    //        let (tx, rx) = channel::<i32>(3);
+    //        let permit = tx.reserve().await.unwrap();
+    //        rx.close_all();
+    //        assert_no_recv(&rx).await;
+    //        drop(permit);
+    //        assert_eq!(rx.recv().await, Err(RecvError));
+    //    }
 
-//    #[tokio::test]
-//    async fn reserve_owned() {
-//        let (tx, rx) = channel::<usize>(4);
-//        let tx = tx.reserve_owned().await.unwrap().send(1);
-//        let tx = tx.reserve_owned().await.unwrap().send(2);
-//        let tx = tx.try_reserve_owned().unwrap().send(3);
-//        let tx = tx.try_reserve_owned().unwrap().release();
-//        let tx = tx.try_reserve_owned().unwrap().send(4);
-//        assert!(matches!(
-//            tx.clone().try_reserve_owned(),
-//            Err(TrySendError::Full(_))
-//        ));
-//        for i in 1..=4 {
-//            assert_eq!(rx.try_recv().unwrap(), i);
-//        }
-//        drop(rx);
-//        assert!(matches!(
-//            tx.clone().reserve_owned().await,
-//            Err(ReserveError)
-//        ));
-//        assert!(matches!(
-//            tx.try_reserve_owned(),
-//            Err(TrySendError::Disconnected(_))
-//        ));
-//    }
+    //    #[tokio::test]
+    //    async fn reserve_owned() {
+    //        let (tx, rx) = channel::<usize>(4);
+    //        let tx = tx.reserve_owned().await.unwrap().send(1);
+    //        let tx = tx.reserve_owned().await.unwrap().send(2);
+    //        let tx = tx.try_reserve_owned().unwrap().send(3);
+    //        let tx = tx.try_reserve_owned().unwrap().release();
+    //        let tx = tx.try_reserve_owned().unwrap().send(4);
+    //        assert!(matches!(
+    //            tx.clone().try_reserve_owned(),
+    //            Err(TrySendError::Full(_))
+    //        ));
+    //        for i in 1..=4 {
+    //            assert_eq!(rx.try_recv().unwrap(), i);
+    //        }
+    //        drop(rx);
+    //        assert!(matches!(
+    //            tx.clone().reserve_owned().await,
+    //            Err(ReserveError)
+    //        ));
+    //        assert!(matches!(
+    //            tx.try_reserve_owned(),
+    //            Err(TrySendError::Disconnected(_))
+    //        ));
+    //    }
 
-//    #[tokio::test]
-//    async fn reserve_many() {
-//        let (tx, rx) = channel::<usize>(10);
-//        let p1 = tx.reserve_many(5).await.unwrap();
-//        let p2 = tx.try_reserve_many(5).unwrap();
-//        assert!(matches!(tx.try_send(11), Err(TrySendError::Full(11))));
-//        for (i, p) in p1.enumerate() {
-//            p.send(i);
-//        }
-//        for (i, p) in p2.enumerate() {
-//            p.send(i + 5);
-//        }
-//        for i in 0..10 {
-//            assert_eq!(rx.try_recv().unwrap(), i);
-//        }
-//    }
+    //    #[tokio::test]
+    //    async fn reserve_many() {
+    //        let (tx, rx) = channel::<usize>(10);
+    //        let p1 = tx.reserve_many(5).await.unwrap();
+    //        let p2 = tx.try_reserve_many(5).unwrap();
+    //        assert!(matches!(tx.try_send(11), Err(TrySendError::Full(11))));
+    //        for (i, p) in p1.enumerate() {
+    //            p.send(i);
+    //        }
+    //        for (i, p) in p2.enumerate() {
+    //            p.send(i + 5);
+    //        }
+    //        for i in 0..10 {
+    //            assert_eq!(rx.try_recv().unwrap(), i);
+    //        }
+    //    }
 
-//    #[tokio::test]
-//    async fn reserve_many_drop() {
-//        let (tx, _rx) = channel::<usize>(2);
-//        let it = tx.reserve_many(2).await.unwrap();
-//        drop(it);
-//        tx.try_send(1).unwrap();
-//        tx.try_send(2).unwrap();
-//        assert!(matches!(tx.try_send(3), Err(TrySendError::Full(3))));
-//    }
+    //    #[tokio::test]
+    //    async fn reserve_many_drop() {
+    //        let (tx, _rx) = channel::<usize>(2);
+    //        let it = tx.reserve_many(2).await.unwrap();
+    //        drop(it);
+    //        tx.try_send(1).unwrap();
+    //        tx.try_send(2).unwrap();
+    //        assert!(matches!(tx.try_send(3), Err(TrySendError::Full(3))));
+    //    }
 
-//    #[tokio::test]
-//    async fn reserve_many_drop_halfway() {
-//        let (tx, _rx) = channel::<usize>(4);
-//        let mut it = tx.reserve_many(4).await.unwrap();
-//        it.next().unwrap().send(1);
-//        it.next().unwrap().send(2);
-//        drop(it);
-//        tx.try_send(3).unwrap();
-//        tx.try_send(4).unwrap();
-//        assert!(matches!(tx.try_send(5), Err(TrySendError::Full(5))));
-//    }
+    //    #[tokio::test]
+    //    async fn reserve_many_drop_halfway() {
+    //        let (tx, _rx) = channel::<usize>(4);
+    //        let mut it = tx.reserve_many(4).await.unwrap();
+    //        it.next().unwrap().send(1);
+    //        it.next().unwrap().send(2);
+    //        drop(it);
+    //        tx.try_send(3).unwrap();
+    //        tx.try_send(4).unwrap();
+    //        assert!(matches!(tx.try_send(5), Err(TrySendError::Full(5))));
+    //    }
 
-//    async fn assert_no_recv<T>(rx: &Receiver<T>)
-//    where
-//        T: std::fmt::Debug + Send + Sync + 'static,
-//    {
-//        tokio::select! {
-//            result = rx.recv() => {
-//                panic!("unexpected recv: {result:?}");
-//            },
-//            _ = tokio::time::sleep(std::time::Duration::ZERO) => {},
-//        }
-//    }
+    //    async fn assert_no_recv<T>(rx: &Receiver<T>)
+    //    where
+    //        T: std::fmt::Debug + Send + Sync + 'static,
+    //    {
+    //        tokio::select! {
+    //            result = rx.recv() => {
+    //                panic!("unexpected recv: {result:?}");
+    //            },
+    //            _ = tokio::time::sleep(std::time::Duration::ZERO) => {},
+    //        }
+    //    }
 
-//    struct ReadyFuture {}
+    //    struct ReadyFuture {}
 
-//    impl Future for ReadyFuture {
-//        type Output = ();
+    //    impl Future for ReadyFuture {
+    //        type Output = ();
 
-//        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-//            Poll::Ready(())
-//        }
-//    }
-//}
+    //        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    //            Poll::Ready(())
+    //        }
+    //    }
+}

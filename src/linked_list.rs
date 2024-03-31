@@ -1,5 +1,5 @@
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Implements a double-linked list with O(1) complexity for:
 /// - `push` operation, and
@@ -14,6 +14,9 @@ pub struct LinkedList<T> {
     head_tail: HeadTail<T>,
     len: usize,
 }
+
+unsafe impl<T> Send for LinkedList<T> where T: Send {}
+unsafe impl<T> Sync for LinkedList<T> where T: Sync {}
 
 impl<T> Default for LinkedList<T> {
     fn default() -> Self {
@@ -301,7 +304,6 @@ impl<T> LinkedList<T> {
         IntoIter::new(self)
     }
 
-
     /// Removes the element by reference.
     ///
     /// Returns [None] when the item is no longer part of the list.
@@ -427,14 +429,12 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
 }
 
 pub struct IntoIter<T> {
-     list: LinkedList<T>,
+    list: LinkedList<T>,
 }
 
 impl<'a, T> IntoIter<T> {
     fn new(list: LinkedList<T>) -> Self {
-        Self {
-            list,
-        }
+        Self { list }
     }
 }
 
@@ -451,7 +451,6 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
         self.list.pop_tail()
     }
 }
-
 
 #[derive(Clone)]
 struct HeadTail<T> {
@@ -496,6 +495,9 @@ pub struct NodeRef<T> {
     /// Reference to actual node in the list.
     node_ptr: *mut Node<T>,
 }
+
+unsafe impl<T> Send for NodeRef<T> where T: Send {}
+unsafe impl<T> Sync for NodeRef<T> where T: Sync {}
 
 impl<T> Clone for NodeRef<T> {
     fn clone(&self) -> Self {

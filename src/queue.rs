@@ -27,15 +27,15 @@ impl<T> Queue<T> {
         }
     }
 
-    /// Returns the number of queued items, including values and reserved spots.
-    pub fn len(&self) -> usize {
-        self.len
-    }
+    // /// Returns the number of queued items, including values and reserved spots.
+    // pub fn len(&self) -> usize {
+    //     self.len
+    // }
 
-    /// Returns the maximum number of items in the Queue. This value never changes.
-    pub fn cap(&self) -> usize {
-        self.cap
-    }
+    // /// Returns the maximum number of items in the Queue. This value never changes.
+    // pub fn cap(&self) -> usize {
+    //     self.cap
+    // }
 
     pub fn has_room_for(&self, count: usize) -> bool {
         self.len + count <= self.cap
