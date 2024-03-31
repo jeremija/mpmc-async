@@ -7,7 +7,7 @@ use crate::linked_list::{LinkedList, NodeRef};
 /// The implemented methods panic when used incorrectly. This is because incorrect usage is a bug
 /// in the codebase and any sort of error handling would result in incorrect behavior.
 pub struct Queue<T> {
-    list: LinkedList<Spot<T>>,
+    pub list: LinkedList<Spot<T>>,
     len: usize,
     cap: usize,
 }
@@ -38,6 +38,10 @@ impl<T> Queue<T> {
     // }
 
     pub fn has_room_for(&self, count: usize) -> bool {
+        println!(
+            "has_room_for {:?} + {:?} <= {:?}",
+            self.len, count, self.cap
+        );
         self.len + count <= self.cap
     }
 
@@ -55,6 +59,7 @@ impl<T> Queue<T> {
         }
 
         let reservation = self.list.push_tail(Spot::Reserved(count));
+        self.len += count;
 
         Some(reservation)
     }
@@ -66,10 +71,13 @@ impl<T> Queue<T> {
                 let spot = self.list.pop_head().expect("value");
 
                 match spot {
-                    Spot::Value(value) => Recv::Value(value),
+                    Spot::Value(value) => {
+                        self.len -= 1;
+                        Recv::Value(value)
+                    }
                     Spot::Reserved(_) => unreachable!(),
                 }
-            },
+            }
             Some(Spot::Reserved(_)) => Recv::Pending,
             None => Recv::Empty,
         }
@@ -96,8 +104,10 @@ impl<T> Queue<T> {
         let value = Spot::Value(value);
 
         if *count == 0 {
+            println!("setting value");
             *spot = value;
         } else {
+            println!("pushing before");
             self.list
                 .push_before(&reservation, value)
                 .expect("push_before failed");
@@ -119,6 +129,8 @@ impl<T> Queue<T> {
             panic!("count {count} > cur_count {cur_count}");
         }
 
+        self.len -= count;
+
         if *cur_count == count {
             self.list
                 .remove(reservation)
@@ -127,7 +139,7 @@ impl<T> Queue<T> {
             *cur_count -= count;
         }
 
-        return true
+        return true;
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use crate::linked_list::{LinkedList, NodeRef};
-use crate::queue::{Queue, Spot, Recv};
+use crate::queue::{Queue, Recv, Spot};
 use crate::{Receiver, RecvError, ReserveError, Sender, TryRecvError, TryReserveError};
 
 pub struct State<T> {
@@ -200,7 +200,7 @@ where
         callback: F,
     ) -> Poll<Result<R, RecvError>>
     where
-        F: FnOnce(T, &mut InnerState<T>) -> R
+        F: FnOnce(T, &mut InnerState<T>) -> R,
     {
         let mut inner = self.inner_mut();
 
@@ -213,14 +213,14 @@ where
                 let ret = callback(value, &mut inner);
 
                 Poll::Ready(Ok(ret))
-            },
+            }
             Err(TryRecvError::Disconnected) => Poll::Ready(Err(RecvError)),
             Err(TryRecvError::Empty) => {
                 let waker = cx.waker().clone();
                 match waker_ref {
                     None => {
                         *waker_ref = Some(inner.recv_futures.push_tail(waker));
-                    },
+                    }
                     Some(waker_ref) => {
                         // Satisfying the following requirement from std::future::Future::poll
                         // docs:
@@ -228,9 +228,10 @@ where
                         //     Note that on multiple calls to poll, only the Waker from the Context
                         //     passed to the most recent call should be scheduled to receive a
                         //     wakeup.
-                        let waker_ref_mut = inner.recv_futures.get_mut(waker_ref).expect("recv_future");
+                        let waker_ref_mut =
+                            inner.recv_futures.get_mut(waker_ref).expect("recv_future");
                         *waker_ref_mut = waker;
-                    },
+                    }
                 }
 
                 Poll::Pending
@@ -346,7 +347,7 @@ where
                 } else {
                     Err(TryRecvError::Empty)
                 }
-            },
+            }
         }
     }
 
@@ -364,7 +365,7 @@ where
                 Recv::Value(value) => {
                     vec.push(value);
                     total += 1;
-                },
+                }
                 Recv::Pending | Recv::Empty => break,
             }
         }

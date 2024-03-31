@@ -123,18 +123,20 @@ impl<T> LinkedList<T> {
         };
 
         let mut node = Node::new(value);
-        node.prev = node_ref.node_ptr;
-        node.next = other_node.next;
+        node.prev = other_node.prev;
+        node.next = node_ref.node_ptr;
 
-        let next_ptr = node.next;
+        let prev_ptr = node.prev;
 
         let node_ptr = Box::into_raw(Box::new(node));
-        other_node.next = node_ptr;
+        other_node.prev = node_ptr;
 
-        let next = unsafe { next_ptr.as_mut() };
+        let prev = unsafe { prev_ptr.as_mut() };
 
-        if let Some(next) = next {
-            next.prev = node_ptr;
+        if let Some(prev) = prev {
+            prev.next = node_ptr;
+        } else {
+            self.head_tail.head = node_ptr;
         }
 
         self.len += 1;
@@ -152,18 +154,20 @@ impl<T> LinkedList<T> {
         };
 
         let mut node = Node::new(value);
-        node.prev = other_node.prev;
-        node.next = node_ref.node_ptr;
+        node.prev = node_ref.node_ptr;
+        node.next = other_node.next;
 
-        let prev_ptr = node.next;
+        let next_ptr = node.next;
 
         let node_ptr = Box::into_raw(Box::new(node));
         other_node.next = node_ptr;
 
-        let prev = unsafe { prev_ptr.as_mut() };
+        let next = unsafe { next_ptr.as_mut() };
 
-        if let Some(prev) = prev {
-            prev.next = node_ptr;
+        if let Some(next) = next {
+            next.prev = node_ptr;
+        } else {
+            self.head_tail.tail = node_ptr;
         }
 
         self.len += 1;
