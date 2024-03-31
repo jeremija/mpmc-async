@@ -148,7 +148,7 @@ where
         let waker = {
             let mut inner = self.inner_mut();
             inner.queue.send(reservation, value);
-            inner.recv_futures.head().map(|waker| waker.clone())
+            inner.recv_futures.head().cloned()
         };
 
         if let Some(waker) = waker {
@@ -170,7 +170,7 @@ where
                         .send_futures
                         .head()
                         .filter(|send_waker| inner.queue.has_room_for(send_waker.count))
-                        .map(|send_waker| send_waker.clone())
+                        .map(|send_waker| send_waker.waker.clone())
                 })
                 .flatten()
         };
@@ -283,7 +283,6 @@ where
     }
 }
 
-#[derive(Clone)]
 pub struct SendWaker {
     count: usize,
     waker: Waker,
@@ -401,7 +400,7 @@ where
         if !self.queue.can_recv() {
             // NOTE: Not calling pop_head() because calling wake() does not guarantee that the future will be
             // chosen (e.g. in a tokio::select!)
-            self.recv_futures.head().map(|waker| waker.clone())
+            self.recv_futures.head().cloned()
         } else {
             None
         }

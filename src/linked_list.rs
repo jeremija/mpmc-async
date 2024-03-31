@@ -436,7 +436,7 @@ pub struct IntoIter<T> {
     list: LinkedList<T>,
 }
 
-impl<'a, T> IntoIter<T> {
+impl<T> IntoIter<T> {
     fn new(list: LinkedList<T>) -> Self {
         Self { list }
     }
