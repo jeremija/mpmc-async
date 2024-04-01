@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Implements a double-linked list with O(1) complexity for:
 /// - `push` operation, and
@@ -199,20 +199,7 @@ impl<T> LinkedList<T> {
             return None;
         }
 
-        let node = unsafe { Box::from_raw(self.head_tail.head) };
-
-        if self.head_tail.head == self.head_tail.tail {
-            self.head_tail.head = std::ptr::null_mut();
-            self.head_tail.tail = std::ptr::null_mut();
-        } else {
-            self.head_tail.head = node.next;
-
-            if let Some(next) = unsafe { node.next.as_mut() } {
-                next.prev = std::ptr::null_mut();
-            }
-        }
-
-        Some(node.value)
+        self.remove_node(self.head_tail.head)
     }
 
     /// Removes the last item in the list if any and returns it.
@@ -225,24 +212,7 @@ impl<T> LinkedList<T> {
             "head and tail should both be null or non-null"
         );
 
-        if self.head_tail.tail.is_null() {
-            return None;
-        }
-
-        let node = unsafe { Box::from_raw(self.head_tail.tail) };
-
-        if self.head_tail.head == self.head_tail.tail {
-            self.head_tail.head = std::ptr::null_mut();
-            self.head_tail.tail = std::ptr::null_mut();
-        } else {
-            self.head_tail.tail = node.prev;
-
-            if let Some(prev) = unsafe { node.prev.as_mut() } {
-                prev.next = std::ptr::null_mut();
-            }
-        }
-
-        Some(node.value)
+        self.remove_node(self.head_tail.tail)
     }
 
     /// Gets a reference to the value by its ref.
@@ -251,7 +221,8 @@ impl<T> LinkedList<T> {
     ///
     /// Complexity: O(1)
     pub fn get(&self, node_ref: &NodeRef<T>) -> Option<&T> {
-        self.get_node(node_ref).map(|node| &node.value)
+        self.get_node(node_ref)
+            .map(|node| node.value.as_ref().expect("value"))
     }
 
     /// Gets a mutable reference to the value by its ref.
@@ -260,7 +231,8 @@ impl<T> LinkedList<T> {
     ///
     /// Complexity: O(1)
     pub fn get_mut(&mut self, node_ref: &NodeRef<T>) -> Option<&mut T> {
-        self.get_node_mut(node_ref).map(|node| &mut node.value)
+        self.get_node_mut(node_ref)
+            .map(|node| node.value.as_mut().expect("value"))
     }
 
     fn get_node(&self, node_ref: &NodeRef<T>) -> Option<&Node<T>> {
@@ -271,7 +243,7 @@ impl<T> LinkedList<T> {
 
         let node = unsafe { node_ref.node_ptr.as_ref()? };
 
-        if node.ref_count.load(Ordering::Relaxed) < 2 {
+        if node.value.is_none() {
             // This node was removed from the list.
             None
         } else {
@@ -287,7 +259,7 @@ impl<T> LinkedList<T> {
 
         let node = unsafe { node_ref.node_ptr.as_mut()? };
 
-        if node.removed.load(Ordering::Relaxed) {
+        if node.value.is_none() {
             // This node was removed from the list.
             None
         } else {
@@ -299,14 +271,24 @@ impl<T> LinkedList<T> {
     ///
     /// Complexity: O(1)
     pub fn head(&self) -> Option<&T> {
-        unsafe { self.head_tail.head.as_ref().map(|node| &node.value) }
+        unsafe {
+            self.head_tail
+                .head
+                .as_ref()
+                .and_then(|node| node.value.as_ref())
+        }
     }
 
     /// Returns a reference to the last element, if any.
     ///
     /// Complexity: O(1)
     pub fn tail(&self) -> Option<&T> {
-        unsafe { self.head_tail.tail.as_ref().map(|node| &node.value) }
+        unsafe {
+            self.head_tail
+                .tail
+                .as_ref()
+                .and_then(|node| node.value.as_ref())
+        }
     }
 
     /// Returns an iterator.
@@ -340,11 +322,7 @@ impl<T> LinkedList<T> {
             return None;
         }
 
-        let node_ptr = node_ref.node_ptr;
-
-        let node = unsafe { Box::from_raw(node_ptr) };
-
-        let value = node.remove(&mut self.head_tail);
+        let value = self.remove_node(node_ref.node_ptr)?;
 
         // Detach from the list.
         node_ref.list_ptr = std::ptr::null_mut();
@@ -352,6 +330,44 @@ impl<T> LinkedList<T> {
         drop(node_ref);
 
         self.len -= 1;
+
+        Some(value)
+    }
+
+    fn remove_node(&mut self, node_ptr: *mut Node<T>) -> Option<T> {
+        let node = unsafe { node_ptr.as_mut()? };
+
+        assert_eq!(
+            self.head_tail.head.is_null(),
+            self.head_tail.tail.is_null(),
+            "head and tail should both be null or non-null"
+        );
+
+        // If value is None, it means node was already removed.
+        let value = node.value.take()?;
+
+        if !node.prev.is_null() {
+            unsafe { (*node.prev).next = node.next }
+        } else {
+            // This was the head.
+            self.head_tail.head = node.next
+        }
+
+        if !node.next.is_null() {
+            unsafe { (*node.next).prev = node.prev }
+        } else {
+            // This was the tail.
+            self.head_tail.tail = node.prev
+        }
+
+        // Last element in the list is both the head and the tail.
+        if self.head_tail.head.is_null() && !self.head_tail.tail.is_null() {
+            self.head_tail.head = self.head_tail.tail
+        } else if !self.head_tail.head.is_null() && self.head_tail.tail.is_null() {
+            self.head_tail.tail = self.head_tail.head
+        }
+
+        maybe_drop_node(node_ptr);
 
         Some(value)
     }
@@ -436,7 +452,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
 
         self.head_tail.head = node.next;
 
-        Some(&node.value)
+        Some(node.value.as_ref().expect("value"))
     }
 }
 
@@ -448,7 +464,7 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
 
         self.head_tail.tail = node.prev;
 
-        Some(&node.value)
+        Some(node.value.as_ref().expect("value"))
     }
 }
 
@@ -483,7 +499,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 
         self.head_tail.head = node.next;
 
-        Some(&mut node.value)
+        Some(node.value.as_mut().expect("value"))
     }
 }
 
@@ -495,7 +511,7 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
 
         self.head_tail.tail = node.prev;
 
-        Some(&mut node.value)
+        Some(node.value.as_mut().expect("value"))
     }
 }
 
@@ -530,13 +546,12 @@ struct HeadTail<T> {
 }
 
 struct Node<T> {
-    value: T,
+    value: Option<T>,
     prev: *mut Node<T>,
     next: *mut Node<T>,
     /// Tracks the number of references. There are only two possible references, the one held by
     /// [LinkedList], and the one from [NodeRef].
     ref_count: AtomicUsize,
-    removed: AtomicBool,
 }
 
 fn maybe_drop_node<T>(node_ptr: *mut Node<T>) {
@@ -601,55 +616,19 @@ impl<T> Drop for NodeRef<T> {
 
 impl<T> AsRef<T> for Node<T> {
     fn as_ref(&self) -> &T {
-        &self.value
+        self.value.as_ref().expect("value")
     }
 }
 
 impl<T> Node<T> {
     fn new(value: T) -> Node<T> {
         Node {
-            value,
+            value: Some(value),
             prev: std::ptr::null_mut(),
             next: std::ptr::null_mut(),
             // One ref for LinkedList, the other for NodeRef.
             ref_count: AtomicUsize::from(2),
-            removed: AtomicBool::from(false),
         }
-    }
-
-    fn remove(self, head_tail: &mut HeadTail<T>) -> T {
-        self.removed.store(true, Ordering::Relaxed);
-
-        let value = self.value;
-
-        assert_eq!(
-            head_tail.head.is_null(),
-            head_tail.tail.is_null(),
-            "head and tail should both be null or non-null"
-        );
-
-        if !self.prev.is_null() {
-            unsafe { (*self.prev).next = self.next }
-        } else {
-            // This was the head.
-            head_tail.head = self.next
-        }
-
-        if !self.next.is_null() {
-            unsafe { (*self.next).prev = self.prev }
-        } else {
-            // This was the tail.
-            head_tail.tail = self.prev
-        }
-
-        // Last element in the list is both the head and the tail.
-        if head_tail.head.is_null() && !head_tail.tail.is_null() {
-            head_tail.head = head_tail.tail
-        } else if !head_tail.head.is_null() && head_tail.tail.is_null() {
-            head_tail.tail = head_tail.head
-        }
-
-        value
     }
 }
 
