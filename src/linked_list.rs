@@ -296,11 +296,15 @@ impl<T> LinkedList<T> {
     }
 
     /// Returns a reference to the first element, if any.
+    ///
+    /// Complexity: O(1)
     pub fn head(&self) -> Option<&T> {
         unsafe { self.head_tail.head.as_ref().map(|node| &node.value) }
     }
 
     /// Returns a reference to the last element, if any.
+    ///
+    /// Complexity: O(1)
     pub fn tail(&self) -> Option<&T> {
         unsafe { self.head_tail.tail.as_ref().map(|node| &node.value) }
     }
@@ -313,7 +317,15 @@ impl<T> LinkedList<T> {
         })
     }
 
-    /// Returns an iterator.
+    /// Returns a mutable iterator.
+    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
+        IterMut::new(HeadTail {
+            head: self.head_tail.head,
+            tail: self.head_tail.tail,
+        })
+    }
+
+    /// Takes ownership of self and returns an iterator over the list.
     pub fn into_iter(self) -> IntoIter<T> {
         IntoIter::new(self)
     }
@@ -437,6 +449,53 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
         self.head_tail.tail = node.prev;
 
         Some(&node.value)
+    }
+}
+
+pub struct IterMut<'a, T> {
+    head_tail: HeadTail<T>,
+    phantom: PhantomData<&'a T>,
+}
+
+impl<'a, T> IterMut<'a, T> {
+    fn new(head_tail: HeadTail<T>) -> Self {
+        Self {
+            head_tail,
+            phantom: Default::default(),
+        }
+    }
+
+    fn check_done(&mut self) {
+        if self.head_tail.head == self.head_tail.tail {
+            self.head_tail.head = std::ptr::null_mut();
+            self.head_tail.tail = std::ptr::null_mut();
+        }
+    }
+}
+
+impl<'a, T> Iterator for IterMut<'a, T> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<&'a mut T> {
+        let node = unsafe { self.head_tail.head.as_mut()? };
+
+        self.check_done();
+
+        self.head_tail.head = node.next;
+
+        Some(&mut node.value)
+    }
+}
+
+impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let node = unsafe { self.head_tail.tail.as_mut()? };
+
+        self.check_done();
+
+        self.head_tail.tail = node.prev;
+
+        Some(&mut node.value)
     }
 }
 
@@ -792,5 +851,19 @@ mod tests {
         assert!(matches!(list.tail(), Some(&4)));
         assert_eq!(list.iter().collect::<Vec<_>>(), vec![&1, &2, &3, &4]);
         assert_eq!(list.iter().rev().collect::<Vec<_>>(), vec![&4, &3, &2, &1]);
+    }
+
+    #[test]
+    fn iter_mut() {
+        let mut list: LinkedList<_> = (0..10).collect();
+
+        for item in list.iter_mut() {
+            *item += 1;
+        }
+
+        assert_eq!(
+            list.into_iter().collect::<Vec<_>>(),
+            (1..11).collect::<Vec<_>>()
+        );
     }
 }
