@@ -19,7 +19,10 @@ pub struct LinkedList<T> {
 unsafe impl<T> Send for LinkedList<T> where T: Send {}
 unsafe impl<T> Sync for LinkedList<T> where T: Sync {}
 
-impl<T> Debug for LinkedList<T> where T: Debug {
+impl<T> Debug for LinkedList<T>
+where
+    T: Debug,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
@@ -709,5 +712,85 @@ mod tests {
         assert!(matches!(list.head(), None));
         assert!(matches!(list.tail(), None));
         assert_eq!(list.iter().collect::<Vec<_>>(), Vec::<&i32>::new());
+    }
+
+    #[test]
+    fn push_head() {
+        let mut list = LinkedList::<i32>::new();
+        assert!(matches!(list.head(), None));
+        assert!(matches!(list.tail(), None));
+        list.push_head(1);
+        list.push_head(2);
+        list.push_head(3);
+        list.push_head(4);
+
+        assert!(matches!(list.head(), Some(&4)));
+        assert!(matches!(list.tail(), Some(&1)));
+        assert_eq!(list.iter().collect::<Vec<_>>(), vec![&4, &3, &2, &1]);
+        assert_eq!(list.iter().rev().collect::<Vec<_>>(), vec![&1, &2, &3, &4]);
+    }
+
+    #[test]
+    fn push_before() {
+        let mut list = LinkedList::<i32>::new();
+        assert!(matches!(list.head(), None));
+        assert!(matches!(list.tail(), None));
+        let node_ref = list.push_head(1);
+        list.push_before(&node_ref, 2).expect("ok");
+        list.push_before(&node_ref, 3).expect("ok");
+        list.push_before(&node_ref, 4).expect("ok");
+
+        assert!(matches!(list.head(), Some(&2)));
+        assert!(matches!(list.tail(), Some(&1)));
+        assert_eq!(list.iter().collect::<Vec<_>>(), vec![&2, &3, &4, &1]);
+        assert_eq!(list.iter().rev().collect::<Vec<_>>(), vec![&1, &4, &3, &2]);
+    }
+
+    #[test]
+    fn push_before_ref() {
+        let mut list = LinkedList::<i32>::new();
+        assert!(matches!(list.head(), None));
+        assert!(matches!(list.tail(), None));
+        let node_ref = list.push_head(1);
+        let node_ref = list.push_before(&node_ref, 2).expect("ok");
+        let node_ref = list.push_before(&node_ref, 3).expect("ok");
+        list.push_before(&node_ref, 4).expect("ok");
+
+        assert!(matches!(list.head(), Some(&4)));
+        assert!(matches!(list.tail(), Some(&1)));
+        assert_eq!(list.iter().collect::<Vec<_>>(), vec![&4, &3, &2, &1]);
+        assert_eq!(list.iter().rev().collect::<Vec<_>>(), vec![&1, &2, &3, &4]);
+    }
+
+    #[test]
+    fn push_after() {
+        let mut list = LinkedList::<i32>::new();
+        assert!(matches!(list.head(), None));
+        assert!(matches!(list.tail(), None));
+        let node_ref = list.push_tail(1);
+        list.push_after(&node_ref, 2).expect("ok");
+        list.push_after(&node_ref, 3).expect("ok");
+        list.push_after(&node_ref, 4).expect("ok");
+
+        assert!(matches!(list.head(), Some(&1)));
+        assert!(matches!(list.tail(), Some(&2)));
+        assert_eq!(list.iter().collect::<Vec<_>>(), vec![&1, &4, &3, &2]);
+        assert_eq!(list.iter().rev().collect::<Vec<_>>(), vec![&2, &3, &4, &1]);
+    }
+
+    #[test]
+    fn push_after_ref() {
+        let mut list = LinkedList::<i32>::new();
+        assert!(matches!(list.head(), None));
+        assert!(matches!(list.tail(), None));
+        let node_ref = list.push_head(1);
+        let node_ref = list.push_after(&node_ref, 2).expect("ok");
+        let node_ref = list.push_after(&node_ref, 3).expect("ok");
+        list.push_after(&node_ref, 4).expect("ok");
+
+        assert!(matches!(list.head(), Some(&1)));
+        assert!(matches!(list.tail(), Some(&4)));
+        assert_eq!(list.iter().collect::<Vec<_>>(), vec![&1, &2, &3, &4]);
+        assert_eq!(list.iter().rev().collect::<Vec<_>>(), vec![&4, &3, &2, &1]);
     }
 }

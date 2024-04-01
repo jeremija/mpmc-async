@@ -567,7 +567,6 @@ where
     }
 }
 
-
 struct RecvFuture<'a, T>
 where
     T: Send + Sync + 'static,
