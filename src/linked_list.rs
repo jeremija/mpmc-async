@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -17,6 +18,12 @@ pub struct LinkedList<T> {
 
 unsafe impl<T> Send for LinkedList<T> where T: Send {}
 unsafe impl<T> Sync for LinkedList<T> where T: Sync {}
+
+impl<T> Debug for LinkedList<T> where T: Debug {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
 
 impl<T> Default for LinkedList<T> {
     fn default() -> Self {
@@ -326,8 +333,6 @@ impl<T> LinkedList<T> {
 
         // Detach from the list.
         node_ref.list_ptr = std::ptr::null_mut();
-
-        println!("setting node_ref.0 to null");
 
         drop(node_ref);
 

@@ -144,6 +144,29 @@ where
         }
     }
 
+    pub fn drop_reserve_future(&self, waker_ref: &mut Option<NodeRef<SendWaker>>) {
+        let (recv_waker, send_waker) = {
+            let mut inner = self.inner_mut();
+
+            if let Some(node_ref) = waker_ref.take() {
+                inner.send_futures.remove(node_ref);
+            }
+
+            (
+                inner.next_recv_future_waker(),
+                inner.next_send_future_waker(),
+            )
+        };
+
+        if let Some(waker) = recv_waker {
+            waker.wake();
+        }
+
+        if let Some(waker) = send_waker {
+            waker.wake();
+        }
+    }
+
     pub fn send_with_permit(&self, reservation: NodeRef<Spot<T>>, value: T) {
         let waker = {
             let mut inner = self.inner_mut();
@@ -258,26 +281,27 @@ where
     }
 
     pub fn drop_recv_future(&self, waker_ref: &mut Option<NodeRef<Waker>>) {
-        let waker = {
+        let (recv_waker, send_waker) = {
             let mut inner = self.inner_mut();
 
             if let Some(node_ref) = waker_ref.take() {
                 inner.recv_futures.remove(node_ref);
             }
 
-            let has_received = waker_ref.is_none();
-
-            if has_received {
-                // If we have received, it means a spot was freed in the internal buffer, so wake
-                // one sender.
-                inner.next_send_future_waker()
-            } else {
+            (
                 // If we have not received, it means another RecvFuture might take over.
-                inner.next_recv_future_waker()
-            }
+                inner.next_recv_future_waker(),
+                // If we have received, it means a spot was freed in the internal buffer, so wake
+                // one send_future
+                inner.next_send_future_waker(),
+            )
         };
 
-        if let Some(waker) = waker {
+        if let Some(waker) = recv_waker {
+            waker.wake();
+        }
+
+        if let Some(waker) = send_waker {
             waker.wake();
         }
     }
@@ -386,23 +410,20 @@ where
     fn next_send_future_waker(&self) -> Option<Waker> {
         let send_future = self.send_futures.head()?;
 
-        if self.queue.has_room_for(send_future.count) {
-            // NOTE: Not calling pop_head() because calling wake() does not guarantee that the
-            // future will be chosen (e.g. in a tokio::select!)
-            Some(send_future.waker.clone())
-        } else {
-            None
-        }
+        // NOTE: Not calling pop_head() because calling wake() does not guarantee that the future
+        // will be chosen (e.g. in a tokio::select!)
+        self.queue
+            .has_room_for(send_future.count)
+            .then_some(send_future.waker.clone())
     }
 
     #[must_use]
     fn next_recv_future_waker(&mut self) -> Option<Waker> {
-        if !self.queue.can_recv() {
-            // NOTE: Not calling pop_head() because calling wake() does not guarantee that the future will be
-            // chosen (e.g. in a tokio::select!)
-            self.recv_futures.head().cloned()
-        } else {
-            None
-        }
+        // NOTE: Not calling pop_head() because calling wake() does not guarantee that the future
+        // will be chosen (e.g. in a tokio::select!)
+        self.queue
+            .can_recv()
+            .then(|| self.recv_futures.head().cloned())
+            .flatten()
     }
 }

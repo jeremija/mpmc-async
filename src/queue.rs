@@ -28,10 +28,6 @@ impl<T> Queue<T> {
     }
 
     pub fn has_room_for(&self, count: usize) -> bool {
-        println!(
-            "has_room_for {:?} + {:?} <= {:?}",
-            self.len, count, self.cap
-        );
         self.len + count <= self.cap
     }
 
@@ -94,10 +90,8 @@ impl<T> Queue<T> {
         let value = Spot::Value(value);
 
         if *count == 0 {
-            println!("setting value");
             *spot = value;
         } else {
-            println!("pushing before");
             self.list
                 .push_before(&reservation, value)
                 .expect("push_before failed");

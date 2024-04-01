@@ -558,6 +558,16 @@ where
     }
 }
 
+impl<'a, T> Drop for ReserveFuture<'a, T>
+where
+    T: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.state.drop_reserve_future(&mut self.waiting)
+    }
+}
+
+
 struct RecvFuture<'a, T>
 where
     T: Send + Sync + 'static,
@@ -844,31 +854,31 @@ mod testing {
         ));
     }
 
-    // #[tokio::test]
-    // async fn recv_future_awoken_but_unused() {
-    //     let (tx, rx) = channel::<i32>(1);
-    //     let mut recv = Box::pin(rx.recv());
-    //     let rx2 = rx.clone();
-    //     // Try receiving from rx2, but don't drop it yet.
-    //     tokio::select! {
-    //         biased;
-    //         _ = &mut recv => {
-    //             panic!("unexpected recv");
-    //         }
-    //         _ = ReadyFuture {} => {}
-    //     }
-    //     let task = tokio::spawn(async move { rx2.recv().await });
-    //     // Yield the current task so task above can be started.
-    //     tokio::time::sleep(Duration::ZERO).await;
-    //     tx.try_send(1).expect("sent");
-    //     // It would hang without the drop, since the recv would be awoken, but we'd never await for
-    //     // it. This is the main flaw of this design where only a single future is awoken at the
-    //     // time. Alternatively, we could wake all of them at once, but this would most likely
-    //     // result in performance degradation due to lock contention.
-    //     drop(recv);
-    //     let res = task.await.expect("no panic").expect("receivd");
-    //     assert_eq!(res, 1);
-    // }
+    #[tokio::test]
+    async fn recv_future_awoken_but_unused() {
+        let (tx, rx) = channel::<i32>(1);
+        let mut recv = Box::pin(rx.recv());
+        let rx2 = rx.clone();
+        // Try receiving from rx2, but don't drop it yet.
+        tokio::select! {
+            biased;
+            _ = &mut recv => {
+                panic!("unexpected recv");
+            }
+            _ = ReadyFuture {} => {}
+        }
+        let task = tokio::spawn(async move { rx2.recv().await });
+        // Yield the current task so task above can be started.
+        tokio::time::sleep(Duration::ZERO).await;
+        tx.try_send(1).expect("sent");
+        // It would hang without the drop, since the recv would be awoken, but we'd never await for
+        // it. This is the main flaw of this design where only a single future is awoken at the
+        // time. Alternatively, we could wake all of them at once, but this would most likely
+        // result in performance degradation due to lock contention.
+        drop(recv);
+        let res = task.await.expect("no panic").expect("received");
+        assert_eq!(res, 1);
+    }
 
     #[tokio::test]
     async fn try_reserve_unused_permit_and_send() {
