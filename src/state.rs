@@ -12,10 +12,7 @@ pub struct State<T> {
 
 impl<T> State<T> {}
 
-impl<T> Clone for State<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> Clone for State<T> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -23,10 +20,7 @@ where
     }
 }
 
-impl<T> State<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> State<T> {
     pub fn new(cap: usize) -> Self {
         State {
             inner: Arc::new(Mutex::new(InnerState::new(cap))),
@@ -337,10 +331,7 @@ struct InnerState<T> {
     disconnected: bool,
 }
 
-impl<T> InnerState<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> InnerState<T> {
     pub fn new(cap: usize) -> Self {
         Self {
             queue: Queue::new(cap),

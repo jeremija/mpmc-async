@@ -187,10 +187,7 @@ impl Display for TryRecvError {
 }
 
 /// Creates a new bounded channel. When `cap` is 0 it will be increased to 1.
-pub fn channel<T>(mut cap: usize) -> (Sender<T>, Receiver<T>)
-where
-    T: Send + Sync + 'static,
-{
+pub fn channel<T>(mut cap: usize) -> (Sender<T>, Receiver<T>) {
     if cap == 0 {
         cap = 1
     }
@@ -201,29 +198,20 @@ where
 }
 
 /// Receives messages sent by [Sender].
-pub struct Receiver<T>
-where
-    T: Send + Sync + 'static,
-{
+pub struct Receiver<T> {
     state: State<T>,
 }
 
 /// Cloning creates new a instance with the shared state  and increases the internal reference
 /// counter. It is guaranteed that a single message will be distributed to exacly one receiver
 /// future awaited after calling `recv()`.
-impl<T> Clone for Receiver<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         self.state.new_receiver()
     }
 }
 
-impl<T> Receiver<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> Receiver<T> {
     fn new(state: State<T>) -> Self {
         Self { state }
     }
@@ -258,27 +246,18 @@ where
 }
 
 /// The last reciever that's dropped will mark the channel as disconnected.
-impl<T> Drop for Receiver<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.state.drop_receiver();
     }
 }
 
 /// Producers messages to be read by [Receiver]s.
-pub struct Sender<T>
-where
-    T: Send + Sync + 'static,
-{
+pub struct Sender<T> {
     state: State<T>,
 }
 
-impl<T> Debug for Sender<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> Debug for Sender<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Sender")
     }
@@ -286,19 +265,13 @@ where
 
 /// Cloning creates new a instance with the shared state  and increases the internal reference
 /// counter.
-impl<T> Clone for Sender<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.state.new_sender()
     }
 }
 
-impl<T> Sender<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> Sender<T> {
     fn new(state: State<T>) -> Sender<T> {
         Self { state }
     }
@@ -367,28 +340,19 @@ where
 }
 
 /// The last sender that's dropped will mark the channel as disconnected.
-impl<T> Drop for Sender<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         self.state.drop_sender();
     }
 }
 
 /// Permit holds a spot in the internal buffer so the message can be sent without awaiting.
-pub struct Permit<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+pub struct Permit<'a, T> {
     sender: &'a Sender<T>,
     reservation: Option<NodeRef<Spot<T>>>,
 }
 
-impl<'a, T> Permit<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Permit<'a, T> {
     fn new(sender: &'a Sender<T>, reservation: NodeRef<Spot<T>>) -> Self {
         Self {
             sender,
@@ -403,10 +367,7 @@ where
     }
 }
 
-impl<'a, T> Drop for Permit<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Drop for Permit<'a, T> {
     fn drop(&mut self) {
         if let Some(reservation) = self.reservation.take() {
             self.sender.state.drop_permit(reservation, 1);
@@ -414,19 +375,13 @@ where
     }
 }
 
-pub struct PermitIterator<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+pub struct PermitIterator<'a, T> {
     sender: &'a Sender<T>,
     reservation: Option<NodeRef<Spot<T>>>,
     count: usize,
 }
 
-impl<'a, T> PermitIterator<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> PermitIterator<'a, T> {
     pub fn new(sender: &'a Sender<T>, reservation: NodeRef<Spot<T>>, count: usize) -> Self {
         Self {
             sender,
@@ -436,10 +391,7 @@ where
     }
 }
 
-impl<'a, T> Iterator for PermitIterator<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Iterator for PermitIterator<'a, T> {
     type Item = Permit<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -459,10 +411,7 @@ where
     }
 }
 
-impl<'a, T> Drop for PermitIterator<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Drop for PermitIterator<'a, T> {
     fn drop(&mut self) {
         if let Some(reservation) = self.reservation.take() {
             self.sender.state.drop_permit(reservation, self.count);
@@ -470,17 +419,11 @@ where
     }
 }
 
-pub struct OwnedPermit<T>
-where
-    T: Send + Sync + 'static,
-{
+pub struct OwnedPermit<T> {
     sender_and_reservation: Option<(Sender<T>, NodeRef<Spot<T>>)>,
 }
 
-impl<T> OwnedPermit<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> OwnedPermit<T> {
     fn new(sender: Sender<T>, reservation: NodeRef<Spot<T>>) -> Self {
         Self {
             sender_and_reservation: Some((sender, reservation)),
@@ -511,10 +454,7 @@ where
     }
 }
 
-impl<T> Drop for OwnedPermit<T>
-where
-    T: Send + Sync + 'static,
-{
+impl<T> Drop for OwnedPermit<T> {
     fn drop(&mut self) {
         // if we haven't called send or release:
         if let Some((sender, reservation)) = self.sender_and_reservation.take() {
@@ -523,19 +463,13 @@ where
     }
 }
 
-struct ReserveFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+struct ReserveFuture<'a, T> {
     state: &'a State<T>,
     count: usize,
     waiting: Option<NodeRef<SendWaker>>,
 }
 
-impl<'a, T> ReserveFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> ReserveFuture<'a, T> {
     fn new(state: &'a State<T>, count: usize) -> Self {
         Self {
             state,
@@ -545,10 +479,7 @@ where
     }
 }
 
-impl<'a, T> Future for ReserveFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Future for ReserveFuture<'a, T> {
     type Output = Result<NodeRef<Spot<T>>, ReserveError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -558,27 +489,18 @@ where
     }
 }
 
-impl<'a, T> Drop for ReserveFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Drop for ReserveFuture<'a, T> {
     fn drop(&mut self) {
         self.state.drop_reserve_future(&mut self.waiting)
     }
 }
 
-struct RecvFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+struct RecvFuture<'a, T> {
     receiver: &'a Receiver<T>,
     waker_ref: Option<NodeRef<Waker>>,
 }
 
-impl<'a, T> RecvFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> RecvFuture<'a, T> {
     fn new(receiver: &'a Receiver<T>) -> Self {
         Self {
             receiver,
@@ -587,12 +509,9 @@ where
     }
 }
 
-impl<'a, T> Unpin for RecvFuture<'a, T> where T: Send + Sync + 'static {}
+impl<'a, T> Unpin for RecvFuture<'a, T> {}
 
-impl<'a, T> Future for RecvFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Future for RecvFuture<'a, T> {
     type Output = Result<T, RecvError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -601,29 +520,20 @@ where
     }
 }
 
-impl<'a, T> Drop for RecvFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Drop for RecvFuture<'a, T> {
     fn drop(&mut self) {
         self.receiver.state.drop_recv_future(&mut self.waker_ref);
     }
 }
 
-struct RecvManyFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+struct RecvManyFuture<'a, T> {
     receiver: &'a Receiver<T>,
     vec: &'a mut Vec<T>,
     count: usize,
     waker_ref: Option<NodeRef<Waker>>,
 }
 
-impl<'a, T> RecvManyFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> RecvManyFuture<'a, T> {
     fn new(receiver: &'a Receiver<T>, vec: &'a mut Vec<T>, count: usize) -> Self {
         Self {
             receiver,
@@ -634,12 +544,9 @@ where
     }
 }
 
-impl<'a, T> Unpin for RecvManyFuture<'a, T> where T: Send + Sync + 'static {}
+impl<'a, T> Unpin for RecvManyFuture<'a, T> {}
 
-impl<'a, T> Future for RecvManyFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Future for RecvManyFuture<'a, T> {
     type Output = Result<usize, RecvError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -650,10 +557,7 @@ where
     }
 }
 
-impl<'a, T> Drop for RecvManyFuture<'a, T>
-where
-    T: Send + Sync + 'static,
-{
+impl<'a, T> Drop for RecvManyFuture<'a, T> {
     fn drop(&mut self) {
         self.receiver.state.drop_recv_future(&mut self.waker_ref);
     }
@@ -1002,7 +906,7 @@ mod testing {
 
     async fn assert_no_recv<T>(rx: &Receiver<T>)
     where
-        T: std::fmt::Debug + Send + Sync + 'static,
+        T: Debug,
     {
         tokio::select! {
             result = rx.recv() => {
