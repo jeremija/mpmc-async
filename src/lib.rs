@@ -125,12 +125,6 @@ impl Display for ReserveError {
     }
 }
 
-impl ReserveError {
-    fn into_send_error<T>(self, value: T) -> SendError<T> {
-        SendError(value)
-    }
-}
-
 /// Occurs when the channel is full, or all receivers have been dropped.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum TryReserveError {
@@ -138,15 +132,6 @@ pub enum TryReserveError {
     Full,
     /// Disconnected
     Disconnected,
-}
-
-impl TryReserveError {
-    fn into_try_send_error<T>(self, value: T) -> TrySendError<T> {
-        match self {
-            TryReserveError::Full => TrySendError::Full(value),
-            TryReserveError::Disconnected => TrySendError::Disconnected(value),
-        }
-    }
 }
 
 impl Display for TryReserveError {
@@ -278,24 +263,12 @@ impl<T> Sender<T> {
 
     /// Waits until the value is sent or returns an when all receivers have been dropped.
     pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
-        match self.reserve().await {
-            Ok(permit) => {
-                permit.send(value);
-                Ok(())
-            }
-            Err(err) => Err(err.into_send_error(value)),
-        }
+        SendFuture::new(&self.state, value).await
     }
 
     /// Sends without blocking or returns an when all receivers have been dropped.
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
-        match self.try_reserve() {
-            Ok(permit) => {
-                permit.send(value);
-                Ok(())
-            }
-            Err(err) => Err(err.into_try_send_error(value)),
-        }
+        self.state.try_send(value)
     }
 
     /// Waits until a permit is reserved or returns an when all receivers have been dropped.
@@ -463,6 +436,41 @@ impl<T> Drop for OwnedPermit<T> {
     }
 }
 
+struct SendFuture<'a, T> {
+    state: &'a State<T>,
+    value: Option<T>,
+    waiting: Option<NodeRef<SendWaker>>,
+}
+
+impl<'a, T> Unpin for SendFuture<'a, T> {}
+
+impl<'a, T> SendFuture<'a, T> {
+    fn new(state: &'a State<T>, value: T) -> Self {
+        Self {
+            state,
+            value: Some(value),
+            waiting: None,
+        }
+    }
+}
+
+impl<'a, T> Future for SendFuture<'a, T> {
+    type Output = Result<(), SendError<T>>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.deref_mut();
+
+        this.state.send(&mut this.value, cx, &mut this.waiting)
+    }
+}
+
+impl<'a, T> Drop for SendFuture<'a, T> {
+    fn drop(&mut self) {
+        self.state
+            .drop_send_future(&mut self.value, &mut self.waiting)
+    }
+}
+
 struct ReserveFuture<'a, T> {
     state: &'a State<T>,
     count: usize,
@@ -498,6 +506,7 @@ impl<'a, T> Drop for ReserveFuture<'a, T> {
 struct RecvFuture<'a, T> {
     receiver: &'a Receiver<T>,
     waker_ref: Option<NodeRef<Waker>>,
+    has_received: bool,
 }
 
 impl<'a, T> RecvFuture<'a, T> {
@@ -505,6 +514,7 @@ impl<'a, T> RecvFuture<'a, T> {
         Self {
             receiver,
             waker_ref: None,
+            has_received: false,
         }
     }
 }
@@ -516,13 +526,17 @@ impl<'a, T> Future for RecvFuture<'a, T> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.deref_mut();
-        this.receiver.state.recv(cx, &mut self.waker_ref)
+        this.receiver
+            .state
+            .recv(cx, &mut this.has_received, &mut this.waker_ref)
     }
 }
 
 impl<'a, T> Drop for RecvFuture<'a, T> {
     fn drop(&mut self) {
-        self.receiver.state.drop_recv_future(&mut self.waker_ref);
+        self.receiver
+            .state
+            .drop_recv_future(self.has_received, &mut self.waker_ref);
     }
 }
 
@@ -531,6 +545,7 @@ struct RecvManyFuture<'a, T> {
     vec: &'a mut Vec<T>,
     count: usize,
     waker_ref: Option<NodeRef<Waker>>,
+    has_received: bool,
 }
 
 impl<'a, T> RecvManyFuture<'a, T> {
@@ -540,6 +555,7 @@ impl<'a, T> RecvManyFuture<'a, T> {
             vec,
             count,
             waker_ref: None,
+            has_received: false,
         }
     }
 }
@@ -551,15 +567,21 @@ impl<'a, T> Future for RecvManyFuture<'a, T> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.deref_mut();
-        this.receiver
-            .state
-            .recv_many(cx, &mut this.waker_ref, this.vec, this.count)
+        this.receiver.state.recv_many(
+            cx,
+            &mut this.has_received,
+            &mut this.waker_ref,
+            this.vec,
+            this.count,
+        )
     }
 }
 
 impl<'a, T> Drop for RecvManyFuture<'a, T> {
     fn drop(&mut self) {
-        self.receiver.state.drop_recv_future(&mut self.waker_ref);
+        self.receiver
+            .state
+            .drop_recv_future(self.has_received, &mut self.waker_ref);
     }
 }
 

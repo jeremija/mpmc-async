@@ -39,6 +39,18 @@ impl<T> Queue<T> {
     }
 
     /// Attempts to reserve a number of spots in the queue if there is room.
+    pub fn try_send(&mut self, value: &mut Option<T>) -> Option<()> {
+        if !self.has_room_for(1) {
+            return None;
+        }
+
+        let value = value.take().expect("value");
+        self.list.push_tail(Spot::Value(value));
+        self.len += 1;
+        Some(())
+    }
+
+    /// Attempts to reserve a number of spots in the queue if there is room.
     pub fn try_reserve(&mut self, count: usize) -> Option<NodeRef<Spot<T>>> {
         if !self.has_room_for(count) {
             return None;

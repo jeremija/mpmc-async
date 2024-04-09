@@ -4,7 +4,10 @@ use std::task::{Context, Poll, Waker};
 
 use crate::linked_list::{LinkedList, NodeRef};
 use crate::queue::{Queue, Recv, Spot};
-use crate::{Receiver, RecvError, ReserveError, Sender, TryRecvError, TryReserveError};
+use crate::{
+    Receiver, RecvError, ReserveError, SendError, Sender, TryRecvError, TryReserveError,
+    TrySendError,
+};
 
 pub struct State<T> {
     inner: Arc<Mutex<InnerState<T>>>,
@@ -88,6 +91,103 @@ impl<T> State<T> {
             for send_future in send_futures {
                 send_future.wake();
             }
+        }
+    }
+
+    pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
+        let mut opt = Some(value);
+        match self.inner_mut().try_send(&mut opt) {
+            Ok(()) => Ok(()),
+            Err(InnerSendError::Disconnected) => {
+                Err(TrySendError::Disconnected(opt.take().unwrap()))
+            }
+            Err(InnerSendError::Full) => Err(TrySendError::Full(opt.take().unwrap())),
+        }
+    }
+
+    pub fn send(
+        &self,
+        value: &mut Option<T>,
+        cx: &mut Context<'_>,
+        waker_ref: &mut Option<NodeRef<SendWaker>>,
+    ) -> Poll<Result<(), SendError<T>>> {
+        let mut inner = self.inner_mut();
+
+        match inner.try_send(value) {
+            Ok(()) => {
+                if let Some(send_future) = waker_ref.take() {
+                    inner.send_futures.remove(send_future);
+                }
+
+                Self::inner_drop_send_future(inner, value, waker_ref);
+
+                Poll::Ready(Ok(()))
+            }
+            Err(InnerSendError::Full) => {
+                let send_future = SendWaker::new(1, cx.waker().clone());
+
+                match waker_ref {
+                    None => {
+                        *waker_ref = Some(inner.send_futures.push_tail(send_future));
+                    }
+                    Some(waker_ref) => {
+                        // Satisfying the following requirement from std::future::Future::poll
+                        // docs:
+                        //
+                        //     Note that on multiple calls to poll, only the Waker from the Context
+                        //     passed to the most recent call should be scheduled to receive a
+                        //     wakeup.
+                        let send_future_mut =
+                            inner.send_futures.get_mut(waker_ref).expect("send_future");
+                        *send_future_mut = send_future;
+                    }
+                }
+
+                Poll::Pending
+            }
+            Err(InnerSendError::Disconnected) => Poll::Ready(Err(SendError(value.take().unwrap()))),
+        }
+    }
+
+    pub fn drop_send_future(
+        &self,
+        value: &mut Option<T>,
+        waker_ref: &mut Option<NodeRef<SendWaker>>,
+    ) {
+        let inner = self.inner_mut();
+        // If we'd already sent, both value and waker_ref will be None. It means we'd already
+        // dropped everything we needed.
+        if value.is_some() || waker_ref.is_some() {
+            Self::inner_drop_send_future(inner, value, waker_ref);
+        }
+    }
+
+    fn inner_drop_send_future(
+        mut inner: impl DerefMut<Target = InnerState<T>>,
+        value: &mut Option<T>,
+        waker_ref: &mut Option<NodeRef<SendWaker>>,
+    ) {
+        let sent = value.is_none();
+
+        let waker = {
+            if let Some(node_ref) = waker_ref.take() {
+                inner.send_futures.remove(node_ref);
+            }
+            let waker = if sent {
+                // We just sent, wake a receiver.
+                inner.next_recv_future_waker()
+            } else {
+                // A spot was freed, wake another sender
+                inner.next_send_future_waker()
+            };
+
+            drop(inner);
+
+            waker
+        };
+
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 
@@ -205,14 +305,16 @@ impl<T> State<T> {
     pub fn recv(
         &self,
         cx: &mut Context<'_>,
+        has_received: &mut bool,
         waker_ref: &mut Option<NodeRef<Waker>>,
     ) -> Poll<Result<T, RecvError>> {
-        self.recv_with_callback(cx, waker_ref, |value, _inner| value)
+        self.recv_with_callback(cx, has_received, waker_ref, |value, _inner| value)
     }
 
     fn recv_with_callback<F, R>(
         &self,
         cx: &mut Context<'_>,
+        has_received: &mut bool,
         waker_ref: &mut Option<NodeRef<Waker>>,
         callback: F,
     ) -> Poll<Result<R, RecvError>>
@@ -227,7 +329,11 @@ impl<T> State<T> {
                     inner.recv_futures.remove(node_ref);
                 }
 
+                *has_received = true;
+
                 let ret = callback(value, &mut inner);
+
+                Self::inner_drop_recv_future(inner, true, waker_ref);
 
                 Poll::Ready(Ok(ret))
             }
@@ -264,38 +370,49 @@ impl<T> State<T> {
     pub fn recv_many(
         &self,
         cx: &mut Context<'_>,
+        has_received: &mut bool,
         waker_ref: &mut Option<NodeRef<Waker>>,
         vec: &mut Vec<T>,
         count: usize,
     ) -> Poll<Result<usize, RecvError>> {
-        self.recv_with_callback(cx, waker_ref, |value, inner| {
+        self.recv_with_callback(cx, has_received, waker_ref, |value, inner| {
             vec.push(value);
             inner.fill_rest(vec, count)
         })
     }
 
-    pub fn drop_recv_future(&self, waker_ref: &mut Option<NodeRef<Waker>>) {
-        let (recv_waker, send_waker) = {
-            let mut inner = self.inner_mut();
+    pub fn drop_recv_future(&self, has_received: bool, waker_ref: &mut Option<NodeRef<Waker>>) {
+        let inner = self.inner_mut();
+        if !has_received {
+            Self::inner_drop_recv_future(inner, has_received, waker_ref);
+        }
+    }
 
+    fn inner_drop_recv_future(
+        mut inner: impl DerefMut<Target = InnerState<T>>,
+        has_received: bool,
+        waker_ref: &mut Option<NodeRef<Waker>>,
+    ) {
+        let waker = {
             if let Some(node_ref) = waker_ref.take() {
                 inner.recv_futures.remove(node_ref);
             }
 
-            (
+            let waker = if !has_received {
                 // If we have not received, it means another RecvFuture might take over.
-                inner.next_recv_future_waker(),
+                inner.next_recv_future_waker()
+            } else {
                 // If we have received, it means a spot was freed in the internal buffer, so wake
                 // one send_future
-                inner.next_send_future_waker(),
-            )
+                inner.next_send_future_waker()
+            };
+
+            drop(inner);
+
+            waker
         };
 
-        if let Some(waker) = recv_waker {
-            waker.wake();
-        }
-
-        if let Some(waker) = send_waker {
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
@@ -331,6 +448,11 @@ struct InnerState<T> {
     disconnected: bool,
 }
 
+pub enum InnerSendError {
+    Disconnected,
+    Full,
+}
+
 impl<T> InnerState<T> {
     pub fn new(cap: usize) -> Self {
         Self {
@@ -340,6 +462,14 @@ impl<T> InnerState<T> {
             send_futures: LinkedList::new(),
             recv_futures: LinkedList::new(),
             disconnected: false,
+        }
+    }
+
+    pub fn try_send(&mut self, value: &mut Option<T>) -> Result<(), InnerSendError> {
+        if self.disconnected {
+            Err(InnerSendError::Disconnected)
+        } else {
+            self.queue.try_send(value).ok_or(InnerSendError::Full)
         }
     }
 
