@@ -1,6 +1,6 @@
 [package]
 name = "mpmc-async"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "A multi-producer, multi-consumer async channel with reservations"
 repository = "https://github.com/jeremija/mpmc-async"
